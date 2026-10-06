@@ -393,9 +393,15 @@ static char auto_connect_target[128];
 
 // Main thread, once per frame.
 void boiii_frame(void) {
-    if (auto_connect_at && now_ms() >= auto_connect_at) {
-        auto_connect_at = 0;
-        start_connect(auto_connect_target);
+    // Auto-connect once the player has been sitting in the Zombies menu (not
+    // in a match) for 5 seconds.
+    if (auto_connect_at) {
+        if (!bo3_is_zombies() || *client_state(0) >= CONNSTATE_CHALLENGING) auto_connect_at = now_ms() + 5000;
+        else if (now_ms() >= auto_connect_at) {
+            auto_connect_at = 0;
+            t7_log("[BO3MacFix] BOIII: Zombies menu detected, auto-connecting\n");
+            start_connect(auto_connect_target);
+        }
     }
     if (target.launch) {
         target.launch = 0;
@@ -444,9 +450,9 @@ void boiii_client_register(void) {
     add_command("boiii_connect", boiii_connect_command, command_storage);
     const char *automatic = getenv("BO3MACFIX_BOIII_CONNECT");
     if (enabled() && automatic && *automatic) {
-        // Give the game time to reach the main menu before launching.
+        // Fires from boiii_frame once the Zombies menu is reached.
         snprintf(auto_connect_target, sizeof(auto_connect_target), "%s", automatic);
-        auto_connect_at = now_ms() + 20000;
-        t7_log("[BO3MacFix] BOIII: auto-connect to %s in 20 s\n", auto_connect_target);
+        auto_connect_at = now_ms() + 5000;
+        t7_log("[BO3MacFix] BOIII: will auto-connect to %s from the Zombies menu\n", auto_connect_target);
     }
 }

@@ -10,8 +10,9 @@ BO3MACFIX_DEBUG_XP=1
 # Servidores BOIII/Ezz (experimental). Abre el socket del juego a internet y añade
 # el comando de consola: boiii_connect ip:puerto  (entra desde el menú de Zombies)
 BO3MACFIX_BOIII=1
-# Conexión automática ~20 s después de llegar al menú (si no puedes abrir la consola):
-# BO3MACFIX_BOIII_CONNECT=5.161.179.25:6002
+# Conexión automática: se conecta sola tras 5 s en el menú de Zombies (sin consola).
+# Pon # delante para desactivarla.
+BO3MACFIX_BOIII_CONNECT=5.161.179.25:6002
 
 # Otras opciones disponibles:
 # BO3MACFIX_AUDIO_SAMPLES=1024   (bloque mínimo de audio; 512 = menos latencia, 2048 = más estable)

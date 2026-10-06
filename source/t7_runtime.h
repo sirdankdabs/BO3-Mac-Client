@@ -19,6 +19,7 @@ void t7_install_lua_symbols(void);
 bool get_friends_only(void);
 void set_friends_only(bool enabled);
 bool bo3_is_campaign(void);
+bool bo3_is_zombies(void);
 // BOIII/Ezz community servers (boiii_probe.c, boiii_client.c)
 void boiii_register(void);
 void boiii_client_register(void);
