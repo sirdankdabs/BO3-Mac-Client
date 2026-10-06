@@ -1,0 +1,13 @@
+# Opciones de BO3MacFix (una por línea, CLAVE=VALOR). Borra o comenta (#) para desactivar.
+# Steam en Mac no admite "env ... %command%" en las opciones de lanzamiento: usa este archivo.
+
+# Ranked spoofing (T7Patch SPOOF_RANKED). Riesgo de baneo bajo tu responsabilidad.
+BO3MACFIX_SPOOF_RANKED=1
+
+# Otras opciones disponibles:
+# BO3MACFIX_FRIENDSONLY=1
+# BO3MACFIX_PLAYERNAME=TuNombre
+# BO3MACFIX_NETWORKPASSWORD=contraseña
+# BO3MACFIX_AUTOINSTALLMODS=1
+# BO3MACFIX_DISABLE_STEAM_FILTERS=1
+# BO3MACFIX_DISABLE_OPTIONAL_HOOKS=1

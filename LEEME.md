@@ -1,4 +1,4 @@
-# BO3MacFix 1.2-beta6-t7patch3.09
+# BO3MacFix 1.2-beta7-t7patch3.09
 
 Basado en BO3MacFix `985f0c2` (último commit de InvoxiPlayGames/BO3MacFix) con la capa T7 de la versión `t7compat.2`, actualizada a **T7Patch 3.09** (`Scroptss/T7Patch-src` `16b9b50`, 1 oct 2026).
 
@@ -63,7 +63,8 @@ Después de abrir el juego, mira `BO3MacFix/t7-status.log`. Deberías ver línea
 ## Volver a la versión anterior
 En esta carpeta están `BO3MacFix.dylib.beta5-backup` (versión anterior, sin ranked spoof), `BO3MacFix.dylib.beta4-backup`, `BO3MacFix.dylib.t7compat2-backup` (versión de Codex), `LEEME.t7compat2-backup.md` y `SHA256SUMS.t7compat2-backup`. Para volver atrás, copia el backup sobre `BO3MacFix.dylib`.
 
-## Variables útiles (opciones de lanzamiento de Steam)
+## Opciones (`BO3MacFix/bo3macfix.conf`)
+En Mac, Steam lanza el `.app` directamente, así que `env VAR=1 %command%` en las opciones de lanzamiento **falla con "OS Error 260"**. Las opciones se ponen en `bo3macfix.conf`, junto a la dylib (una `CLAVE=VALOR` por línea, `#` para comentar). Si una variable ya existe en el entorno, tiene prioridad sobre el archivo.
 | Variable | Efecto |
 | --- | --- |
 | `BO3MACFIX_DISABLE_OPTIONAL_HOOKS=1` | Desactiva todos los hooks T7 internos |

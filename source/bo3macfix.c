@@ -1,3 +1,4 @@
+#include <dlfcn.h>
 #include <_stdio.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -615,6 +616,37 @@ install_hook_name(SDL_GameControllerInitMappings, int, void)
     return r;
 }
 
+// Steam on macOS launches the .app bundle itself, so "env VAR=1 %command%"
+// launch options cannot work there. Read BO3MACFIX_* options from
+// bo3macfix.conf next to this dylib instead (KEY=VALUE per line, '#' comments).
+// Variables already present in the environment win.
+static void load_config_file(void) {
+    Dl_info info;
+    if (!dladdr((const void *)load_config_file, &info) || !info.dli_fname) return;
+    char path[1024];
+    snprintf(path, sizeof(path), "%s", info.dli_fname);
+    char *slash = strrchr(path, '/');
+    if (!slash) return;
+    snprintf(slash + 1, sizeof(path) - (size_t)(slash + 1 - path), "bo3macfix.conf");
+    FILE *file = fopen(path, "r");
+    if (!file) return;
+    char line[1024];
+    while (fgets(line, sizeof(line), file)) {
+        line[strcspn(line, "\r\n")] = 0;
+        char *key = line;
+        while (*key == ' ' || *key == '\t') ++key;
+        if (*key == '#' || strncmp(key, "BO3MACFIX_", 10)) continue;
+        char *value = strchr(key, '=');
+        if (!value) continue;
+        *value++ = 0;
+        char *end = key + strlen(key);
+        while (end > key && (end[-1] == ' ' || end[-1] == '\t')) *--end = 0;
+        while (*value == ' ' || *value == '\t') ++value;
+        setenv(key, value, 0);
+    }
+    fclose(file);
+}
+
 // Entrypoint for the dylib
 __attribute__((constructor)) static void dylib_main() {
     // make sure we're loading into the game process and nothing else
@@ -623,6 +655,8 @@ __attribute__((constructor)) static void dylib_main() {
     const char *image_name = filename_from_path(image_path);
     if (strcmp(image_name, "CoDBlkOps3_Exe") != 0)
         return;
+
+    load_config_file();
 
     // get the base address of the binary
     game_base_address = get_base_address();
