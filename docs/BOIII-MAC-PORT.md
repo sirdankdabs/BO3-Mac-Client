@@ -38,3 +38,6 @@ Fuente analizada: `Ezz-lol/boiii-free` (solo lectura). La parte de saltarse la p
 - Implementar ECC compatible con libtomcrypt (clave, firma, `get_hash`) y el formato de `profile_info`.
 - Saltar las comprobaciones de Steam ID del cliente que BOIII parchea: `XUID_Valid`, `LiveSteamAuth_Pump`, lobby…
 - Probar si el contenido de la versión de Mac (2018) carga los mapas y scripts del servidor (versión final de Windows). **Esto solo se puede saber probando.**
+
+## Fase 2 (beta12): cliente experimental
+`BO3MACFIX_BOIII=1` + `boiii_connect ip:puerto` (o `BO3MACFIX_BOIII_CONNECT`). Implementado en `source/boiii_client.c`: socket en 0.0.0.0 (interposición de `bind`), `CL_LaunchClient(map, gametype)`, redirección en `CL_CheckForResend`, challenge en el filtro connectionless, `connect` firmado (libtomcrypt develop, P-521, X9.62/SHA-512) y fragmentado en `NET_OutOfBandData`. Clave persistente en `BO3MacFix/boiii_key.dat`. Autenticación verificada contra un servidor real desde fuera del juego; el flujo dentro del juego está pendiente de probar.

@@ -34,4 +34,9 @@ static const struct { const char *name; uint64_t rva; const char *prologue; } t7
     {"LiveSteam_ServerFrame", 0xf6908e, "554889e553504889fbe896d96b00e876"}, // "STEAM_SERVER: Frame: Init!" state machine, called every frame via 0xf6a7ce
     {"GScr_AddRankXP", 0x13e97f4, "554889e54157415641554154534881ec"}, // "AddRankXP: score type %s not found" (diagnostics only)
     {"SDL_OpenAudioDeviceInternal", 0x12c570, "554889e54157415641554154534881ec"}, // statically linked SDL2 open_audio_device ("No capture support")
+    {"CL_CheckForResend", 0xe17e98, "554889e54157415641554154534881ec"}, // "getchallenge", builds 'connect "..."'
+    {"NET_OutOfBandData", 0x14022b6, "554889e54157415653504489c34989d0"}, // (sock, netadr, data, len)
+    {"NET_OutOfBandPrint", 0x14021e9, "554889e5415741564155415453504889"}, // (sock, netadr, text)
+    {"CL_LaunchClient", 0xd6f75d, "554889e54157415653504989d74989f6"}, // (map, gametype, &error) -> CL_Connect
+    {"CL_GetNetSrc", 0xeae661, "554889e54863f7488d0cf6488d15fd2c"}, // client -> socket id
 };

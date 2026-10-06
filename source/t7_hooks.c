@@ -143,6 +143,7 @@ HOOK(CL_ConnectionlessCMD, bool, int client, uint64_t from_lo, uint64_t from_hi,
     while (*p == ' ' || *p == '\t') ++p;
     while (*p && *p != ' ' && *p != '\t' && *p != '\n' && n < sizeof(command) - 1) command[n++] = *p++;
     command[n] = 0;
+    if (boiii_connectionless(command, msg)) return true;
     // Voice/relay packets ("v", "vt", "relay", "RA") are consumed by the Mac
     // client before its command dispatch, so they stay allowed.
     if (!strcmp(command, "v") || !strcmp(command, "vt") || !strcmp(command, "relay") || !strcmp(command, "RA") ||
@@ -185,11 +186,11 @@ HOOK(LiveSteam_InitServer, void, void) { }
 // With the Steam game server never initialized, its per-frame state machine
 // retries the init every frame and logs "STEAM_SERVER: Frame: Init!" each
 // time (tens of thousands of log writes per session -> stutter). Skip it.
-void boiii_register(void);
 HOOK(LiveSteam_ServerFrame, void, void *server) {
     (void)server;
     static bool registered;
-    if (!registered) { registered = true; boiii_register(); }
+    if (!registered) { registered = true; boiii_register(); boiii_client_register(); }
+    boiii_frame();
 }
 
 // BO3MACFIX_DEBUG_XP=1: log the first AddRankXP calls with the session state
@@ -360,6 +361,7 @@ void t7_install_hooks(void) {
     if (sv_argv && cbuf_add_text && t7_known_mac_build()) { INSTALL(CMD_MenuResponse_f); }
     else t7_log("[BO3MacFix] Menu filter needs the known Mac build.\n");
     t7_log("[BO3MacFix] T7 hooks: %u installed, %u unresolved.\n", installed, missing);
+    boiii_client_install();
     t7_install_lua_symbols();
     t7_init_lobby_inspector();
 }
