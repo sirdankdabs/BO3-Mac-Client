@@ -383,17 +383,19 @@ static bool hook_Sys_SendPacket(int socket_id, int length, const uint8_t *data, 
     return orig_Sys_SendPacket(socket_id, length, data, lo, hi);
 }
 
-// The game binds its UDP socket to 127.0.0.1 (net_ip "localhost"); internet
-// servers need it on all interfaces.
+// Demonware binds the game's UDP socket on net_port (27017, or the next free
+// port); remember it so BOIII traffic can use it. Some builds bind it to
+// 127.0.0.1 (net_ip "localhost"); internet servers need all interfaces.
 static int bind_hook(int socket_fd, const struct sockaddr *address, socklen_t length) {
     if (enabled() && address && address->sa_family == AF_INET && length >= (socklen_t)sizeof(struct sockaddr_in)) {
         struct sockaddr_in copy;
         memcpy(&copy, address, sizeof(copy));
         int type = 0;
         socklen_t type_length = sizeof(type);
-        if (copy.sin_addr.s_addr == htonl(INADDR_LOOPBACK) &&
+        const unsigned port = ntohs(copy.sin_port);
+        if (port >= 27017 && port <= 27027 &&
             !getsockopt(socket_fd, SOL_SOCKET, SO_TYPE, &type, &type_length) && type == SOCK_DGRAM) {
-            copy.sin_addr.s_addr = htonl(INADDR_ANY);
+            if (copy.sin_addr.s_addr == htonl(INADDR_LOOPBACK)) copy.sin_addr.s_addr = htonl(INADDR_ANY);
             int result = bind(socket_fd, (const struct sockaddr *)&copy, sizeof(copy));
             if (!result) game_socket = socket_fd;
             return result;
