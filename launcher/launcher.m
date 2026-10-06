@@ -25,7 +25,7 @@ int main(int argc, char **argv) {
     newEnvironment[@"SteamAppId"] = @"311210";
     // parse our arguments and figure out which ones we send to the new process vs which ones we 
     NSMutableArray *newArguments = [[NSMutableArray alloc] init];
-    for (int i = 0; i < argc; i++) {
+    for (int i = 1; i < argc; i++) {
         if (strcasecmp(argv[i], "--password") == 0 && i + 1 < argc)
             newEnvironment[@"BO3MACFIX_NETWORKPASSWORD"] = [NSString stringWithUTF8String:argv[++i]];
         else if (strcasecmp(argv[i], "--playername") == 0 && i + 1 < argc)
@@ -48,5 +48,5 @@ int main(int argc, char **argv) {
     // launch the game executable
     [gameProc launch];
     [gameProc waitUntilExit];
-    return 0;
+    return [gameProc terminationStatus];
 }

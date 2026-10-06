@@ -24,6 +24,9 @@
 #include "utilities.h"
 #include "offsets.h"
 #include "steam.h"
+#include "network.h"
+#include "t7_runtime.h"
+#include <stdatomic.h>
 
 #include "versioninfo.h"
 
@@ -49,10 +52,10 @@ typedef struct _SESSIONMODE_STATE {
 
 // The base address of the CoDBlkOps3_Exe executable
 uint64_t game_base_address = 0x0;
-// The hashed network password used for network encryption.
-uint64_t network_password = 0;
 // Whether to only allow friends to join the session.
-bool friends_only = false;
+static atomic_bool friends_only = false;
+bool get_friends_only(void) { return atomic_load(&friends_only); }
+void set_friends_only(bool enabled) { atomic_store(&friends_only, enabled); }
 
 // Returns the current gamemode string as used in paths
 static const char *GetGamemodeString() {
@@ -69,6 +72,8 @@ static const char *GetGamemodeString() {
     }
 }
 
+bool bo3_is_campaign(void) { return !strcmp(GetGamemodeString(), "cp"); }
+
 // game functions we call upon
 static void(*build_usermods_path)(const char *filename, const char *extension, size_t out_size, char *out_path, int type_maybe, char *workshop_id);
 static void *(*DB_FindXAssetHeader)(int type, char *name, bool errorIfMissing, int waitTime);
@@ -80,15 +85,12 @@ static void (*MSG_WriteByte)(void *msg, int64_t c);
 
 // Makes sure incoming checksums have our password
 install_hook_name(Sys_VerifyPacketChecksum, int, uint8_t *payload, int paylen) {
-    if (paylen >= 2) {
+    if (payload && paylen >= 2) {
         int newlen = paylen - 2;
-        uint16_t payload_checksum = *(uint16_t *)(payload + newlen);
-        uint16_t expected_checksum = (uint16_t)network_password ^ Sys_Checksum(payload, newlen);
-        if (payload_checksum == expected_checksum)
+        uint16_t payload_checksum;
+        memcpy(&payload_checksum, payload + newlen, sizeof(payload_checksum));
+        if (network_checksum_matches(payload_checksum, Sys_Checksum(payload, newlen), network_now_ms()))
             return newlen;
-#ifdef MACFIX_DEBUG
-        printf("Mismatched packet checksum! (%04x != %04x)\n", payload_checksum, expected_checksum);
-#endif
     }
     return -1;
 }
@@ -96,7 +98,7 @@ install_hook_name(Sys_VerifyPacketChecksum, int, uint8_t *payload, int paylen) {
 // Adds our password onto checksums
 install_hook_name(Sys_CheckSumPacketCopy, uint16_t, uint8_t *dest, uint8_t *payload, int paylen) {
     uint16_t ret = orig_Sys_CheckSumPacketCopy(dest, payload, paylen);
-    ret ^= (uint16_t)network_password;
+    ret ^= (uint16_t)network_get_password();
     return ret;
 }
 
@@ -106,21 +108,23 @@ install_hook_name(Sys_CheckSumPacketCopy, uint16_t, uint8_t *dest, uint8_t *payl
 // Adds password into lobby messages
 install_hook_name(LobbyMsgRW_PrepReadMsg, bool, void *msg) {
     bool orig = orig_LobbyMsgRW_PrepReadMsg(msg);
-    if (orig && network_password != 0 && ZBR_PREFIX_BYTE != 0) {
+    uint64_t network_password = network_get_password();
+    if (orig && network_has_prefix(network_password)) {
         uint8_t prefbyte1 = MSG_ReadByte(msg);
         uint8_t prefbyte2 = MSG_ReadByte(msg);
         if (!ZBR_PREFIX_BYTE || (((prefbyte1 == ZBR_PREFIX_BYTE) && (prefbyte2 == ZBR_PREFIX_BYTE2))))
-            return true;
+            return t7_inspect_lobby(msg);
 #ifdef MACFIX_DEBUG
         printf("Failed prepreadmsg password (Got %02x %02x, expected %02x %02x)\n", prefbyte1, prefbyte2, ZBR_PREFIX_BYTE, ZBR_PREFIX_BYTE2);
 #endif
         return false;
     }
-    return orig;
+    return orig && t7_inspect_lobby(msg);
 }
 install_hook_name(LobbyMsgRW_PrepWriteMsg, bool, void *lobbyMsg, uint8_t *data, int length, int msgType) {
     bool orig = orig_LobbyMsgRW_PrepWriteMsg(lobbyMsg, data, length, msgType);
-    if (orig && network_password != 0) {
+    uint64_t network_password = network_get_password();
+    if (orig && network_has_prefix(network_password)) {
         MSG_WriteByte(lobbyMsg, ZBR_PREFIX_BYTE);
         MSG_WriteByte(lobbyMsg, ZBR_PREFIX_BYTE2);
     }
@@ -171,10 +175,10 @@ install_hook_name(SDL_SetWindowTitle, void, void *sdlWindow, const char *title)
 // Adds the version of our mod to the version info in the corner
 install_hook_name(Live_SystemInfo, bool, int controllerIndex, int info, char *outputString, int outputLen) {
     bool r = orig_Live_SystemInfo(controllerIndex, info, outputString, outputLen);
-    if (info == 0 && r == true) {
+    if (info == 0 && r == true && outputString && outputLen > 0) {
         char newStr[200];
-        snprintf(newStr, 200, Version_Prefix " %s", outputString);
-        strncpy(outputString, newStr, outputLen);
+        snprintf(newStr, sizeof(newStr), Version_Prefix " %.*s", outputLen, outputString);
+        snprintf(outputString, (size_t)outputLen, "%s", newStr);
     }
     return r;
 }
@@ -191,20 +195,9 @@ install_hook_name(dwInstantDispatchMessage, bool, uint64_t userId, int controlle
             return true;
         }
     }
-    if (datalen >= 2) {
-        if (data[0] != 0x31) {
-#ifdef MACFIX_DEBUG
-            printf("Rejecting instant message from %016llx since it's invalid (1)\n", userId);
-#endif
-            return true;
-        }
-        if (data[1] == 0x65 || data[1] == 0x6D) {
-#ifdef MACFIX_DEBUG
-            printf("Rejecting instant message from %016llx since it's invalid (2)\n", userId);
-#endif
-            return true;
-        }
-    }
+    if (!network_instant_message_valid(data, datalen))
+        return true;
+
 #ifdef MACFIX_DEBUG
     printf("Dispatching instant message from %016llx\n", userId);
 #endif
@@ -262,7 +255,7 @@ install_hook_name(HKAI_InitMapData, void, const char *mapname, char restart) {
 
         // make sure the new physics folder exists
         if (access(Macfix_Path "/Physics/", F_OK) != 0)
-            mkdir(Macfix_Path "/Physics/", 0644);
+            mkdir(Macfix_Path "/Physics/", 0755);
 
         // write out the header and all the navmesh/navvolume data to the clump
         FILE *clumpfile = fopen(Macfix_Path "/Physics/convert.clump", "wb");
@@ -378,10 +371,8 @@ static void network_version_patch() {
 
 void set_network_password(const char *password)
 {
-    if (password == NULL || strlen(password) < 1)
-        network_password = 0;
-    else
-        network_password = gscu_canon_hash64(password);
+    uint64_t hash = (password && *password) ? gscu_canon_hash64(password) : 0;
+    network_set_password(hash, network_now_ms());
 }
 
 int system_new(const char *command) {
@@ -489,9 +480,13 @@ bool ISteamApps_BIsDlcInstalled(void *interface, AppId_t app) {
     return steam_dlc_installed(app);
 }
 
+bool ISteamApps_GetDlcDownloadProgress(void *interface, AppId_t app, uint64_t *downloaded, uint64_t *total) {
+    return steam_dlc_download_progress(app, downloaded, total);
+}
+
 char playerNameBuffer[17] = {0};
 void set_player_name(const char *name) {
-    strncpy(playerNameBuffer, name, sizeof(playerNameBuffer));
+    snprintf(playerNameBuffer, sizeof(playerNameBuffer), "%s", name ? name : "");
 }
 const char *get_player_name() {
     return playerNameBuffer;
@@ -512,12 +507,14 @@ install_hook_name(CSteamAPIContext_Init, bool, CSteamAPIContext *ctx) {
     bool r = orig_CSteamAPIContext_Init(ctx);
     if (r == true) {
         init_steam_context(ctx);
+        steam_install_extra_hooks(ctx);
         // populate our caches
         steam_friends_refresh_cache();
         steam_dlc_refresh_cache();
         // replace ISteamApps DLC to use cached versions
         replace_vtable_entry(&(*ctx->m_pSteamApps)->BIsSubscribedApp, ISteamApps_BIsSubscribedApp);
         replace_vtable_entry(&(*ctx->m_pSteamApps)->BIsDlcInstalled, ISteamApps_BIsDlcInstalled);
+        replace_vtable_entry(&(*ctx->m_pSteamApps)->GetDlcDownloadProgress, ISteamApps_GetDlcDownloadProgress);
         // replace ISteamFriends to do our username spoof
         replace_vtable_entry(&(*ctx->m_pSteamFriends)->GetPersonaName, ISteamFriends_GetPersonaName);
     }
@@ -604,6 +601,7 @@ static const char *extraGamepadMappings[] = {
     "030000004c050000a00b000000000000,Sony DualShock 4 Wireless Adaptor,a:b1,b:b2,back:b13,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b12,leftshoulder:b4,leftstick:b10,lefttrigger:a3,leftx:a0,lefty:a1,rightshoulder:b5,rightstick:b11,righttrigger:a4,rightx:a2,righty:a5,start:b9,x:b0,y:b3,",
     NULL
 };
+static void install_hook_SDL_GameControllerInitMappings(void *) __attribute__((unused));
 install_hook_name(SDL_GameControllerInitMappings, int, void)
 {
     int r = orig_SDL_GameControllerInitMappings();
@@ -698,6 +696,8 @@ __attribute__((constructor)) static void dylib_main() {
 
     // patches the network version to match Windows
     network_version_patch();
+
+    t7_install_hooks();
 
     // pre-fetch the wine path so we don't need to search earlier
     get_wine_path();

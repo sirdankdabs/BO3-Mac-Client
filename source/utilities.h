@@ -1,3 +1,6 @@
+#ifndef BO3MACFIX_UTILITIES_H
+#define BO3MACFIX_UTILITIES_H
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 
@@ -10,3 +13,5 @@ void replace_vtable_entry(void *entry, void *replacement);
 bool is_macos_dylib(const char *path);
 bool get_file_sha1(const char *path, uint8_t *output_hash);
 bool bytes_to_hex(const uint8_t *bytes, size_t bytes_len, char *out_string, size_t out_string_len);
+
+#endif

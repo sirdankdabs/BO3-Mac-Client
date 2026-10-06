@@ -87,12 +87,10 @@ uint64_t get_base_address() {
 
 // Gets just the filename of a given path
 const char *filename_from_path(const char *path) {
-    size_t len = strlen(path);
-    for (size_t i = len - 1; i > 0; i--) {
-        if (path[i] == '/')
-            return path + i + 1;
-    }
-    return path;
+    if (!path)
+        return "";
+    const char *slash = strrchr(path, '/');
+    return slash ? slash + 1 : path;
 }
 
 // Detects if the process is running under Rosetta2 or not (find out if we're on ASi or Intel)
@@ -111,7 +109,7 @@ uint64_t gscu_canon_hash64(const char *input) {
 	uint64_t hash = offset;
 	const char* _input = input;
 	while (*_input) {
-		hash = (hash ^ tolower(*_input)) * prime;
+		hash = (hash ^ tolower((unsigned char)*_input)) * prime;
 		_input++;
 	}
 	return 0x7FFFFFFFFFFFFFFF & hash;
@@ -133,12 +131,16 @@ bool is_macos_dylib(const char *path) {
         if (fread(file_magic, 1, 4, fp) == 4) {
             // 0xFEEDFACF - 64-bit Mach-O
             static const uint8_t macho_header_64bit[4] = {0xcf, 0xfa, 0xed, 0xfe};
-            if (memcmp(file_magic, macho_header_64bit, 4) == 0)
+            if (memcmp(file_magic, macho_header_64bit, 4) == 0) {
+                fclose(fp);
                 return true;
+            }
             // 0xCAFEBABE - fat Mach-O
             static const uint8_t macho_header_fat[4] = {0xca, 0xfe, 0xba, 0xbe};
-            if (memcmp(file_magic, macho_header_fat, 4) == 0)
+            if (memcmp(file_magic, macho_header_fat, 4) == 0) {
+                fclose(fp);
                 return true;
+            }
         }
         fclose(fp);
     }
@@ -156,19 +158,22 @@ bool get_file_sha1(const char *path, uint8_t *output_hash) {
         while ((r = fread(file_read_buffer, 1, sizeof(file_read_buffer), fp)) > 0) {
             CC_SHA1_Update(&ctx, file_read_buffer, r);
         }
+        bool success = !ferror(fp);
         CC_SHA1_Final(output_hash, &ctx);
         fclose(fp);
-        return true;
+        return success;
     }
     return false;
 }
 
 bool bytes_to_hex(const uint8_t *bytes, size_t bytes_len, char *out_string, size_t out_string_len) {
-    if ((bytes_len * 2) >= out_string_len)
+    if (!out_string || !out_string_len || bytes_len > (out_string_len - 1) / 2 || (!bytes && bytes_len))
         return false;
-    out_string[0] = '\0';
+    static const char hex[] = "0123456789abcdef";
     for (size_t i = 0; i < bytes_len; i++) {
-        snprintf(out_string, out_string_len, "%s%02x", out_string, bytes[i]);
+        out_string[2 * i] = hex[bytes[i] >> 4];
+        out_string[2 * i + 1] = hex[bytes[i] & 15];
     }
+    out_string[2 * bytes_len] = '\0';
     return true;
 }

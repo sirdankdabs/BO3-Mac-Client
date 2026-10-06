@@ -1,5 +1,9 @@
 # BO3MacFix
 
+Local experimental build: **1.2-beta3-t7compat.2**. Expanded experimental T7Patch adaptation for macOS 11+,
+not full v3.07 parity. See [scope, tests and installation notes](docs/T7PATCH-PORT.md).
+Build with `make test binaries`; package with `bash scripts/package.sh --binaries-only`.
+
 Fixes Black Ops 3 on Mac so custom maps from the Steam Workshop can be played and online matches can be played
 with people running the Windows version of the game.
 

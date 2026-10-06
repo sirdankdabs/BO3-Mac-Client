@@ -13,3 +13,5 @@ BO3MacFixLauncher
 *.dll
 *.clump
 *.bin
+
+build/
