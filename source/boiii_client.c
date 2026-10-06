@@ -133,6 +133,8 @@ static bool is_target(uint64_t address_lo) {
 static void (*NET_OutOfBandPrint)(int, uint64_t, uint64_t, const char *);
 static int (*CL_GetNetSrc)(int);
 static bool (*CL_LaunchClient)(const char *, const char *, const char **);
+static bool (*Com_IsLocalServerRunning)(void);
+static void (*Com_KillLocalServerForLaunch)(void);
 
 static void (*orig_CL_CheckForResend)(int);
 static void hook_CL_CheckForResend(int client) {
@@ -415,6 +417,12 @@ void boiii_frame(void) {
         // "localhost" and the client is connected (the menu's local server).
         // Give it another name so it takes the challenge/connect path.
         snprintf((char *)MAC_ADDR(0x115345b4), 0x100, "%s", "boiii");
+        // Same order as the lobby's client launch (LaunchGameGo, 0x10885f6):
+        // shut the menu's local server down first so its level memory is freed.
+        if (Com_IsLocalServerRunning()) {
+            t7_log("[BO3MacFix] BOIII: stopping the menu's local server\n");
+            Com_KillLocalServerForLaunch();
+        }
         t7_log("[BO3MacFix] BOIII: launching client for %s %s (state %d)\n", target.map, target.gametype,
                *client_state(0));
         if (!CL_LaunchClient(target.map, target.gametype, &error)) {
@@ -440,8 +448,11 @@ void boiii_client_install(void) {
     NET_OutOfBandPrint = t7_resolve_function("NET_OutOfBandPrint");
     CL_GetNetSrc = t7_resolve_function("CL_GetNetSrc");
     CL_LaunchClient = t7_resolve_function("CL_LaunchClient");
+    Com_IsLocalServerRunning = t7_resolve_function("Com_IsLocalServerRunning");
+    Com_KillLocalServerForLaunch = t7_resolve_function("Com_KillLocalServerForLaunch");
     void *resend = t7_resolve_function("CL_CheckForResend"), *oob = t7_resolve_function("NET_OutOfBandData");
-    if (!NET_OutOfBandPrint || !CL_GetNetSrc || !CL_LaunchClient || !resend || !oob) {
+    if (!NET_OutOfBandPrint || !CL_GetNetSrc || !CL_LaunchClient || !Com_IsLocalServerRunning ||
+        !Com_KillLocalServerForLaunch || !resend || !oob) {
         t7_log("[BO3MacFix] BOIII: client functions not mapped\n"); return;
     }
     if (!enabled()) return;

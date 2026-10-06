@@ -39,4 +39,6 @@ static const struct { const char *name; uint64_t rva; const char *prologue; } t7
     {"NET_OutOfBandPrint", 0x14021e9, "554889e5415741564155415453504889"}, // (sock, netadr, text)
     {"CL_LaunchClient", 0xd6f75d, "554889e54157415653504989d74989f6"}, // (map, gametype, &error) -> CL_Connect
     {"CL_GetNetSrc", 0xeae661, "554889e54863f7488d0cf6488d15fd2c"}, // client -> socket id
+    {"Com_IsLocalServerRunning", 0xe71737, "554889e5488b3d1edfa610e8ddea1200"}, // checked by the lobby client launch before CL_LaunchClient
+    {"Com_KillLocalServerForLaunch", 0xe71641, "554889e5535031db881dc2136902b001"}, // "EXE_SERVERKILLED", called by the lobby client launch (0x10885ff)
 };
