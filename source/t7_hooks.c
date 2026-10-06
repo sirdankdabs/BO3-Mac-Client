@@ -8,17 +8,23 @@
 #include <string.h>
 #include <strings.h>
 #include <pthread.h>
+#include <mach-o/dyld.h>
 
 // Only functions resolved from the Mac executable are installed. These native
 // signatures use the SysV ABI; no Win32 calling conventions or RVAs are used.
 #define HOOK(name, result, ...) static result (*orig_##name)(__VA_ARGS__); static result hook_##name(__VA_ARGS__)
 HOOK(LobbyMsgRW_PackageInt, bool, void *msg, const char *key, int32_t *value) {
-    return value && key && orig_LobbyMsgRW_PackageInt(msg, key, value) && t7_lobby_value_valid(key, *value);
+    if (!value || !key || !orig_LobbyMsgRW_PackageInt(msg, key, value)) return false;
+    if (!strcasecmp(key, "datamask") && *value == 0) return false; // T7Patch 3.09
+    return t7_lobby_value_valid(key, *value);
 }
 HOOK(LobbyMsgRW_PackageUInt, bool, void *msg, const char *key, uint32_t *value) {
-    // Datamask handling needs a verified session-state interpretation and is
-    // intentionally not borrowed from the Windows global layout.
-    return value && key && orig_LobbyMsgRW_PackageUInt(msg, key, value) && t7_lobby_value_valid(key, *value);
+    // The Mac build serializes "datamask" through this wrapper (type 1).
+    // T7Patch 3.09 rejects a zero datamask; the Windows session-state check
+    // that follows it relies on a global with no verified Mac address.
+    if (!value || !key || !orig_LobbyMsgRW_PackageUInt(msg, key, value)) return false;
+    if (!strcasecmp(key, "datamask") && *value == 0) return false;
+    return t7_lobby_value_valid(key, *value);
 }
 HOOK(LobbyMsgRW_PackageUChar, bool, void *msg, const char *key, uint8_t *value) {
     if (!value || !key || !orig_LobbyMsgRW_PackageUChar(msg, key, value)) return false;
@@ -56,11 +62,28 @@ HOOK(CL_GetConfigString, const char *, int32_t index) {
         !strncasecmp(value, "mspreload", 9)) return "";
     return value;
 }
-HOOK(LobbyMsgRW_PrintMessage, void, void) { }
-HOOK(LobbyMsgRW_PrintDebugMessage, int32_t, void) { return 0; }
+HOOK(LobbyMsgRW_PrintMessage, void, void *msg, bool force) { (void)msg; (void)force; }
+// Mac LobbyMsgRW reads nested "Start Debug Tag" (0xf) elements recursively, so a
+// crafted message can nest them until the stack overflows. Cap the depth and
+// mark the message overflowed (msg_t.overflowed is the first int32), which
+// every caller treats as a failed read.
+static __thread int debug_section_depth;
+HOOK(LobbyMsgRW_ReadDebugSection, int32_t, int32_t *msg) {
+    if (debug_section_depth >= 16) {
+        if (msg) *msg = 1;
+        return 0x10; // "End Debug Tag": unwinds the caller's loop
+    }
+    ++debug_section_depth;
+    int32_t type = orig_LobbyMsgRW_ReadDebugSection(msg);
+    --debug_section_depth;
+    return type;
+}
 HOOK(ExecLuaCMD, void, void) { }
 HOOK(UI_BrowserOpen, char, int64_t arg) { (void)arg; return 0; }
-HOOK(Mods_SubscribeUGC, bool, int64_t arg) { (void)arg; return false; }
+HOOK(Mods_SubscribeUGC, bool, int64_t arg) {
+    const char *enabled = getenv("BO3MACFIX_AUTOINSTALLMODS");
+    return enabled && !strcmp(enabled, "1") ? orig_Mods_SubscribeUGC(arg) : false;
+}
 // T7Patch makes Steam lobbies friends-only separately from this opt-in filter.
 static bool invite_allowed(uint64_t id) {
     return !get_friends_only() || id == steam_id().id || steam_friends_with_user(id);
@@ -75,43 +98,61 @@ HOOK(LiveInvites_SendJoinInfo, int64_t, unsigned client, uint64_t id, int64_t ar
     return invite_allowed(id) ? orig_LiveInvites_SendJoinInfo(client, id, arg) : 0;
 }
 
-// Replace Windows TLS access with native command argument accessors.
-static const char *(*cmd_argv)(int);
-static void (*sv_argv)(int, char *, int);
-static bool (*lobby_host)(int);
-static const char *(*event_string)(unsigned, unsigned);
-HOOK(CL_ConnectionlessCMD, bool, int client, void *from, void *message) {
-    const char *command = cmd_argv(0);
-    return t7_connectionless_allowed(command, bo3_is_campaign()) ?
-        orig_CL_ConnectionlessCMD(client, from, message) : true;
+// Mac CL_ConnectionlessCMD(localClient, netadr_t from /* 16 bytes, two regs */, msg_t *msg)
+// tokenizes the packet itself, so Cmd_Argv is not valid on entry. Read the
+// command from a private copy of msg_t with the game's own MSG readers.
+// Mac msg_t: +0 overflowed, +8 data, +0x10 splitData, +0x1c cursize,
+// +0x20 splitSize, +0x24 readcount, +0x28 bit.
+#define MAC_ADDR(rva) ((uintptr_t)(rva) + 0x100000000ull + (uintptr_t)_dyld_get_image_vmaddr_slide(0))
+static void (*MSG_BeginReading)(void *msg);
+static int32_t (*MSG_ReadLong)(void *msg);
+static char *(*MSG_ReadStringLine)(void *msg, char *buffer, int size);
+HOOK(CL_ConnectionlessCMD, bool, int client, uint64_t from_lo, uint64_t from_hi, void *msg) {
+    uint8_t copy[0x2c]; char line[1024], command[64];
+    if (!t7_memory_readable(msg, sizeof(copy))) return true;
+    memcpy(copy, msg, sizeof(copy));
+    MSG_BeginReading(copy);
+    MSG_ReadLong(copy);
+    MSG_ReadStringLine(copy, line, sizeof(line));
+    const char *p = line; size_t n = 0;
+    while (*p == ' ' || *p == '\t') ++p;
+    while (*p && *p != ' ' && *p != '\t' && *p != '\n' && n < sizeof(command) - 1) command[n++] = *p++;
+    command[n] = 0;
+    // Voice/relay packets ("v", "vt", "relay", "RA") are consumed by the Mac
+    // client before its command dispatch, so they stay allowed.
+    if (!strcmp(command, "v") || !strcmp(command, "vt") || !strcmp(command, "relay") || !strcmp(command, "RA") ||
+        t7_connectionless_allowed(command, bo3_is_campaign()))
+        return orig_CL_ConnectionlessCMD(client, from_lo, from_hi, msg);
+    return true;
 }
-static bool menu_allowed(char *entity, bool cached) {
-    char response[1024] = {0};
-    sv_argv(3, response, sizeof(response));
-    response[sizeof(response)-1] = 0;
-    const char *text = response;
-    if (cached) {
-        char *end; unsigned long index = strtoul(response, &end, 10);
-        if (!response[0] || *end || index >= 256) return false;
-        text = event_string(0, (unsigned)index);
-    }
-    int32_t entity_number = -1;
-    if (t7_memory_readable(entity, sizeof(entity_number))) memcpy(&entity_number, entity, sizeof(entity_number));
-    return t7_menu_response_allowed(text, entity_number == 0 && lobby_host(1));
+
+// T7Patch 3.09 menu-response policy on top of the Mac handler, which already
+// checks the server id and bans a non-host lobby trying to end the game.
+static void (*sv_argv)(int, char *, int);
+static void (*cbuf_add_text)(int, const char *);
+static unsigned menu_entity_number(char *entity) {
+    // Same computation as the Mac handler's own banClient path.
+    uintptr_t base = *(uintptr_t *)MAC_ADDR(0x1966be8);
+    return (unsigned)(((uintptr_t)entity - base) >> 3) * 0x2eb11b5fu;
 }
 HOOK(CMD_MenuResponse_f, void, char *entity) {
-    if (menu_allowed(entity, false)) orig_CMD_MenuResponse_f(entity);
+    const int32_t *args = (const int32_t *)MAC_ADDR(0x125dc3c0); // sv_cmd_args
+    if (args[*args + 0x64 / 4] == 4) {
+        char response[1024] = {0};
+        sv_argv(3, response, sizeof(response));
+        unsigned number = menu_entity_number(entity);
+        bool campaign = bo3_is_campaign();
+        bool end_game = !strcasecmp(response, "endgame") || !strcasecmp(response, "endround");
+        if (number != 0 && (!strcasecmp(response, "killserverpc") || !strcasecmp(response, "restart_level_zm") ||
+                            (!campaign && end_game))) {
+            char command[64];
+            snprintf(command, sizeof(command), "tempBanClient %u\n", number);
+            cbuf_add_text(*(int32_t *)MAC_ADDR(0x208f1c8), command);
+            return;
+        }
+    }
+    orig_CMD_MenuResponse_f(entity);
 }
-HOOK(CMD_MenuResponseCached_f, void, char *entity) {
-    if (menu_allowed(entity, true)) orig_CMD_MenuResponseCached_f(entity);
-}
-#define INDEX_HOOK(name, limit) HOOK(name, const char *, unsigned instance, unsigned index) { \
-    return index < limit ? orig_##name(instance, index) : "bad"; }
-INDEX_HOOK(BG_Cache_GetScriptMenuNameForIndex, 64)
-INDEX_HOOK(BG_Cache_GetEventStringNameForIndex, 256)
-INDEX_HOOK(BG_Cache_GetLocStringNameForIndex, 2048)
-INDEX_HOOK(BG_Cache_GetLUIMenuForIndex, 64)
-INDEX_HOOK(BG_Cache_GetLUIMenuDataForIndex, 128)
 HOOK(CL_SwitchState_Idle_Update, int32_t, void *state) {
     return bo3_is_campaign() ? orig_CL_SwitchState_Idle_Update(state) : 0;
 }
@@ -144,7 +185,7 @@ void t7_install_hooks(void) {
     unsigned installed = 0, missing = 0;
 #define INSTALL(name) do { \
     void *address = t7_resolve_function(#name); \
-    if (!address) { ++missing; t7_log("[BO3MacFix] T7 missing symbol: %s\n", #name); } \
+    if (!address) { ++missing; t7_log("[BO3MacFix] T7 %s: not mapped for this executable\n", #name); } \
     else { int result = DobbyHook(address, (void *)hook_##name, (void **)&orig_##name); \
         t7_log("[BO3MacFix] T7 %s: %s\n", #name, result == 0 ? "active" : "hook failed"); \
         if (!result) ++installed; } \
@@ -161,7 +202,7 @@ void t7_install_hooks(void) {
     INSTALL(qmemcpy);
     INSTALL(CL_GetConfigString);
     INSTALL(LobbyMsgRW_PrintMessage);
-    INSTALL(LobbyMsgRW_PrintDebugMessage);
+    INSTALL(LobbyMsgRW_ReadDebugSection);
     INSTALL(ExecLuaCMD);
     INSTALL(UI_BrowserOpen);
     INSTALL(Mods_SubscribeUGC);
@@ -171,21 +212,17 @@ void t7_install_hooks(void) {
     INSTALL(Scr_GscObjLink);
     INSTALL(CL_SwitchState_Idle_Update);
     INSTALL(LiveSteam_InitServer);
-    INSTALL(BG_Cache_GetScriptMenuNameForIndex);
-    INSTALL(BG_Cache_GetEventStringNameForIndex);
-    INSTALL(BG_Cache_GetLocStringNameForIndex);
-    INSTALL(BG_Cache_GetLUIMenuForIndex);
-    INSTALL(BG_Cache_GetLUIMenuDataForIndex);
-    cmd_argv = (void *)t7_resolve_function("Cmd_Argv");
-    if (cmd_argv) { INSTALL(CL_ConnectionlessCMD); }
-    else t7_log("[BO3MacFix] Connectionless filter needs Cmd_Argv.\n");
-    sv_argv = (void *)t7_resolve_function("SV_Cmd_ArgvBuffer");
-    lobby_host = (void *)t7_resolve_function("LobbyHost_IsHost");
-    event_string = (void *)t7_resolve_function("BG_Cache_GetEventStringNameForIndex");
-    if (sv_argv && lobby_host) {
-        INSTALL(CMD_MenuResponse_f);
-        if (event_string) { INSTALL(CMD_MenuResponseCached_f); }
-    } else t7_log("[BO3MacFix] Menu filters need SV_Cmd_ArgvBuffer and LobbyHost_IsHost.\n");
+    // BG_Cache_* index hooks stay disabled, as in upstream T7Patch.
+    MSG_BeginReading = t7_resolve_function("MSG_BeginReading");
+    MSG_ReadLong = t7_resolve_function("MSG_ReadLong");
+    MSG_ReadStringLine = t7_resolve_function("MSG_ReadStringLine");
+    if (MSG_BeginReading && MSG_ReadLong && MSG_ReadStringLine) { INSTALL(CL_ConnectionlessCMD); }
+    else t7_log("[BO3MacFix] Connectionless filter needs the MSG readers.\n");
+    // The menu filter also reads globals, so it needs the exact known build.
+    sv_argv = t7_resolve_function("SV_Cmd_ArgvBuffer");
+    cbuf_add_text = t7_resolve_function("Cbuf_AddText");
+    if (sv_argv && cbuf_add_text && t7_known_mac_build()) { INSTALL(CMD_MenuResponse_f); }
+    else t7_log("[BO3MacFix] Menu filter needs the known Mac build.\n");
     t7_log("[BO3MacFix] T7 optional hooks: %u installed, %u unresolved.\n", installed, missing);
     t7_install_lua_symbols();
     t7_init_lobby_inspector();

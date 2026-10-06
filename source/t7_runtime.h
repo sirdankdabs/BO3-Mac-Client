@@ -8,6 +8,8 @@ extern "C" {
 #endif
 void t7_log(const char *format, ...) __attribute__((format(printf, 1, 2)));
 void *t7_resolve_function(const char *name);
+// True when the running executable is the Mac build t7_mac_symbols.h describes.
+bool t7_known_mac_build(void);
 bool t7_memory_readable(const void *address, size_t size);
 bool t7_memory_writable(const void *address, size_t size);
 void t7_install_hooks(void);

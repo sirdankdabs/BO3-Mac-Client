@@ -58,3 +58,5 @@ test:
 	$(CC) -std=c++17 -Wall -Wextra -Werror -g -fsanitize=address,undefined -I source tests/t7_resolver_test.cpp source/t7_resolver.cpp build/test_utilities.o -lc++ -o build/t7_resolver_test
 	./build/t7_resolver_test
 	./build/t7_resolver_test bad-hash
+	$(CC) -std=c11 -Wall -g -I source tests/dobby_prologue_test.c -Llib -ldobby -lc++ -o build/dobby_prologue_test
+	./build/dobby_prologue_test

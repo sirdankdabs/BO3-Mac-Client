@@ -1,4 +1,5 @@
 #include "t7_runtime.h"
+#include "t7_mac_symbols.h"
 extern "C" {
 #include "utilities.h"
 }
@@ -53,6 +54,7 @@ struct Resolver {
     std::unordered_map<std::string, uintptr_t> symbols;
     std::vector<Range> executable;
     uint64_t base = 0;
+    bool known_build = false;
     intptr_t slide = _dyld_get_image_vmaddr_slide(0);
     bool is_code(uint64_t address, size_t size = 1) const {
         for (auto r : executable)
@@ -131,6 +133,15 @@ struct Resolver {
                 free(demangled);
             }
         }
+        uint8_t digest[20]; char actual[41];
+        if (!get_file_sha1(path, digest) || !bytes_to_hex(digest, 20, actual, sizeof(actual))) return;
+        // Built-in map for the known Mac executable (see t7_mac_symbols.h).
+        if (!strcmp(actual, T7_MAC_SYMBOLS_SHA1)) {
+            known_build = true;
+            for (const auto &entry : t7_mac_symbols) add_mapped(entry.name, entry.rva, entry.prologue);
+        } else {
+            t7_log("[BO3MacFix] Built-in T7 map skipped: executable %s is not the known Mac build.\n", actual);
+        }
         // Optional analyst-supplied Mac map. Exact executable hash AND prologue
         // bytes are mandatory. There are deliberately no default Windows RVAs.
         const char *map_path = getenv("BO3MACFIX_SYMBOL_MAP");
@@ -138,8 +149,7 @@ struct Resolver {
         std::ifstream map(map_path);
         std::string keyword, hash;
         if (!(map >> keyword >> hash) || keyword != "sha1" || hash.size() != 40) return;
-        uint8_t digest[20]; char actual[41];
-        if (!get_file_sha1(path, digest) || !bytes_to_hex(digest, 20, actual, sizeof(actual)) || hash != actual) {
+        if (hash != actual) {
             t7_log("[BO3MacFix] Rejected symbol map: executable hash mismatch.\n"); return;
         }
         std::string line; std::getline(map, line);
@@ -147,21 +157,26 @@ struct Resolver {
             if (line.empty() || line[0] == '#') continue;
             std::istringstream fields(line);
             std::string name, hex, extra; uint64_t rva;
-            if (!(fields >> name >> std::hex >> rva >> hex) || (fields >> extra) ||
-                hex.size() < 16 || hex.size() > 64 || hex.size() % 2 || rva > UINT64_MAX - base) continue;
-            uint64_t address = base + rva;
-            if (!is_code(address, hex.size() / 2)) continue;
-            uint8_t expected[32]; bool valid = true;
-            auto digit = [](char c) -> int { if (c >= '0' && c <= '9') return c-'0'; if(c >= 'a' && c <= 'f') return c-'a'+10; return -1; };
-            for (size_t i = 0; i < hex.size(); i += 2) {
-                int a = digit(hex[i]), b = digit(hex[i+1]);
-                if (a < 0 || b < 0) { valid = false; break; }
-                expected[i / 2] = (a << 4) | b;
-            }
-            const void *pointer = reinterpret_cast<void *>(address + slide);
-            if (valid && t7_memory_readable(pointer, hex.size()/2) && !memcmp(pointer, expected, hex.size()/2))
-                add(name, address + slide);
+            if (!(fields >> name >> std::hex >> rva >> hex) || (fields >> extra)) continue;
+            add_mapped(name, rva, hex);
         }
+    }
+    void add_mapped(const std::string &name, uint64_t rva, const std::string &hex) {
+        if (hex.size() < 16 || hex.size() > 64 || hex.size() % 2 || rva > UINT64_MAX - base) return;
+        uint64_t address = base + rva;
+        if (!is_code(address, hex.size() / 2)) return;
+        uint8_t expected[32];
+        auto digit = [](char c) -> int { if (c >= '0' && c <= '9') return c-'0'; if(c >= 'a' && c <= 'f') return c-'a'+10; return -1; };
+        for (size_t i = 0; i < hex.size(); i += 2) {
+            int a = digit(hex[i]), b = digit(hex[i+1]);
+            if (a < 0 || b < 0) return;
+            expected[i / 2] = (a << 4) | b;
+        }
+        const void *pointer = reinterpret_cast<void *>(address + slide);
+        if (t7_memory_readable(pointer, hex.size()/2) && !memcmp(pointer, expected, hex.size()/2))
+            add(name, address + slide);
+        else
+            t7_log("[BO3MacFix] Map entry %s rejected: prologue mismatch.\n", name.c_str());
     }
 };
 }
@@ -174,4 +189,7 @@ extern "C" void *t7_resolve_function(const char *name) {
         t7_log("[BO3MacFix] Symbol resolution failed for %s.\n", name);
         return nullptr;
     }
+}
+extern "C" bool t7_known_mac_build(void) {
+    try { static Resolver resolver; return resolver.known_build; } catch (...) { return false; }
 }
