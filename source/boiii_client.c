@@ -33,8 +33,10 @@
 #include <unistd.h>
 
 #define MAC_ADDR(rva) ((uintptr_t)(rva) + 0x100000000ull + (uintptr_t)_dyld_get_image_vmaddr_slide(0))
-#define CONNSTATE_CHALLENGING 5
-#define CONNSTATE_CONNECTING 6
+// Mac connstate values, from CL_CheckForResend's jump table (0xe1861c):
+// 4 sends "getchallenge", 5 builds and sends "connect", 6 sends "cfl".
+#define CONNSTATE_CHALLENGING 4
+#define CONNSTATE_CONNECTING 5
 
 static bool enabled(void) {
     const char *value = getenv("BO3MACFIX_BOIII");
@@ -142,7 +144,7 @@ static void hook_CL_CheckForResend(int client) {
     if (target.active && client == 0) {
         uint8_t *address = client_server_address(0);
         int32_t *state = client_state(0);
-        if (address && (*state == CONNSTATE_CHALLENGING || *state == CONNSTATE_CONNECTING)) {
+        if (address && *state >= CONNSTATE_CHALLENGING && *state <= CONNSTATE_CONNECTING + 1) {
             memcpy(address, target.ip, 4);
             memcpy(address + 4, &target.port, 2);
             int32_t ip_type = 4; // NA_IP on the Mac build
