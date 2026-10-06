@@ -15,6 +15,10 @@ static const struct { uint64_t rva; const char *what; } t7_ranked_sites[] = {
     {0x13ea868, "ReportLootConsume (client path)"},
     {0x118c99c, "giveachievement"},
     {0x1082535, "LiveStats first-time flow"},
+    {0x1113a16, "playlist default event rules (xpGroups)"},
+    {0x1113abe, "playlist custom event rules"},
+    {0x11150e7, "gametype rules setup"},
+    {0x1115264, "gametype rules setup (second path)"},
 };
 
 // Call sites of Mods_GetModName (0xe4963f) in the stats storage manager. With

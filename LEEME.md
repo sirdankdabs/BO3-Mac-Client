@@ -1,4 +1,4 @@
-# BO3MacFix 1.2-beta9-t7patch3.09
+# BO3MacFix 1.2-beta10-t7patch3.09
 
 Basado en BO3MacFix `985f0c2` (último commit de InvoxiPlayGames/BO3MacFix) con la capa T7 de la versión `t7compat.2`, actualizada a **T7Patch 3.09** (`Scroptss/T7Patch-src` `16b9b50`, 1 oct 2026).
 
@@ -46,10 +46,11 @@ Funciones auxiliares verificadas igual: `SV_Cmd_ArgvBuffer`, `MSG_BeginReading`,
 - **Desbloqueos de inventario/GobbleGums/DLC y spoof de propiedad** (`SPOOF_UNLOCK`, `SPOOF_OWNERSHIP`): desbloquean contenido de pago que no se ha comprado.
 
 ### Ranked spoofing (opcional, desactivado por defecto)
-Es el `SPOOF_RANKED` de T7Patch 3.09 (Scropts-QOL). Con `BO3MACFIX_SPOOF_RANKED=1`, 13 llamadas a `Mods_IsModsLoaded` (`0xe4962f`) responden "sin mods", así que la XP y las estadísticas siguen contando con un mod cargado. Cada `call` se comprueba antes de cambiarlo por `xor eax,eax`:
+Es el `SPOOF_RANKED` de T7Patch 3.09 (Scropts-QOL). Con `BO3MACFIX_SPOOF_RANKED=1`, 17 llamadas a `Mods_IsModsLoaded` (`0xe4962f`) responden "sin mods", así que la XP y las estadísticas siguen contando con un mod cargado. Cada `call` se comprueba antes de cambiarlo por `xor eax,eax`:
 - Modo de sesión: `0x127afde`, `0x127aff8`, `0x127b043`, `0x127b08c`, `0x127b0c8`
 - Script: `AddWeaponStat` `0x13e7228`, `AddSpecialistStat` `0x13e784b`, `DoubleXPTimerFired` `0x13ea3d1`, `ReportLootReward` `0x13ea577`, `ReportLootConsume` `0x13ea645` y `0x13ea868`, `giveachievement` `0x118c99c`
 - `LiveStats` (primera ejecución): `0x1082535`
+- Reglas de playlist y tipo de juego (activan `xpGroups`): `0x1113a16`, `0x1113abe`, `0x11150e7`, `0x1115264`
 
 Además, al cargar un mod el gestor de estadísticas cambiaba a un perfil separado por mod (y lo reiniciaba), así que la XP nunca llegaba al perfil normal. Con el spoof activo, sus 4 llamadas a `Mods_GetModName` (`0x1102e2b`, `0x1103576`, `0x110358e`, `0x1103750`) se redirigen a `0xf16aae`, una función del juego que devuelve `""`: solo el almacenamiento de estadísticas ve "sin mod".
 
