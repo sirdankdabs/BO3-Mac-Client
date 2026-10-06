@@ -246,6 +246,57 @@ static void t7_install_ranked_spoof(void) {
     }
     t7_log("[BO3MacFix] Ranked spoof: %u/%zu call sites patched.\n", patched,
            sizeof(t7_ranked_sites) / sizeof(t7_ranked_sites[0]));
+
+    // Loading a mod also switches stats storage to a separate per-mod profile
+    // (and resets it), so XP never reaches the normal profile. Make only the
+    // storage manager see an empty mod name by retargeting its
+    // "call Mods_GetModName" to a game function that returns "".
+    static const uint8_t empty_fn[13] = {0x55, 0x48, 0x89, 0xe5, 0x48, 0x8d, 0x05, 0x9f, 0x51, 0x71, 0x00, 0x5d, 0xc3};
+    const uintptr_t empty = MAC_ADDR(T7_EMPTY_STRING_FN), mod_name = MAC_ADDR(T7_GET_MOD_NAME_FN);
+    if (!t7_memory_readable((void *)empty, sizeof(empty_fn)) || memcmp((void *)empty, empty_fn, sizeof(empty_fn))) {
+        t7_log("[BO3MacFix] Ranked spoof storage: empty-string function mismatch, skipped.\n"); return;
+    }
+    unsigned storage = 0;
+    for (size_t i = 0; i < sizeof(t7_storage_modname_sites) / sizeof(t7_storage_modname_sites[0]); ++i) {
+        uint8_t *site = (uint8_t *)MAC_ADDR(t7_storage_modname_sites[i].rva);
+        int32_t rel;
+        if (!t7_memory_readable(site, 5) || site[0] != 0xe8) continue;
+        memcpy(&rel, site + 1, 4);
+        if ((uintptr_t)(site + 5 + rel) != mod_name) continue;
+        uint8_t call[5] = {0xe8};
+        int32_t new_rel = (int32_t)((intptr_t)empty - (intptr_t)(site + 5));
+        memcpy(call + 1, &new_rel, 4);
+        if (DobbyCodePatch(site, call, sizeof(call)) == 0) ++storage;
+        else t7_log("[BO3MacFix] Ranked spoof storage %s: patch failed\n", t7_storage_modname_sites[i].what);
+    }
+    t7_log("[BO3MacFix] Ranked spoof storage: %u/%zu call sites patched.\n", storage,
+           sizeof(t7_storage_modname_sites) / sizeof(t7_storage_modname_sites[0]));
+}
+
+// The WASAPI emulation opens SDL with a block size of a quarter of the game's
+// buffer, which can be only a few milliseconds; under Rosetta the AudioQueue
+// then underruns on any CPU spike (crackles/dropouts). Enforce a minimum block
+// size for output devices. The emulation re-derives its buffer from the
+// obtained spec, so a larger block is accepted transparently.
+typedef struct { int32_t freq; uint16_t format; uint8_t channels, silence; uint16_t samples, padding;
+                 uint32_t size; void *callback, *userdata; } SDLAudioSpec;
+HOOK(SDL_OpenAudioDeviceInternal, uint32_t, const char *device, int capture, const SDLAudioSpec *desired,
+     SDLAudioSpec *obtained, int allowed, int min_id) {
+    const char *setting = getenv("BO3MACFIX_AUDIO_SAMPLES");
+    long minimum = setting ? strtol(setting, NULL, 10) : 1024;
+    if (!capture && desired && minimum >= 64 && minimum <= 8192 && desired->samples < minimum) {
+        SDLAudioSpec larger = *desired;
+        uint16_t samples = 64;
+        while (samples < minimum) samples <<= 1;
+        larger.samples = samples;
+        t7_log("[BO3MacFix] Audio: output %d Hz, %u ch, block %u -> %u samples\n", desired->freq,
+               desired->channels, desired->samples, samples);
+        return orig_SDL_OpenAudioDeviceInternal(device, capture, &larger, obtained, allowed, min_id);
+    }
+    if (!capture && desired)
+        t7_log("[BO3MacFix] Audio: output %d Hz, %u ch, block %u samples (unchanged)\n", desired->freq,
+               desired->channels, desired->samples);
+    return orig_SDL_OpenAudioDeviceInternal(device, capture, desired, obtained, allowed, min_id);
 }
 
 void t7_install_hooks(void) {
@@ -285,6 +336,8 @@ void t7_install_hooks(void) {
     INSTALL(CL_SwitchState_Idle_Update);
     INSTALL(LiveSteam_InitServer);
     INSTALL(LiveSteam_ServerFrame);
+    const char *audio_fix_off = getenv("BO3MACFIX_DISABLE_AUDIO_FIX");
+    if (!(audio_fix_off && !strcmp(audio_fix_off, "1"))) { INSTALL(SDL_OpenAudioDeviceInternal); }
     const char *xp = getenv("BO3MACFIX_DEBUG_XP");
     debug_xp = xp && !strcmp(xp, "1") && t7_known_mac_build();
     if (debug_xp) { INSTALL(GScr_AddRankXP); }

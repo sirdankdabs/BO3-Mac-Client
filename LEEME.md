@@ -1,4 +1,4 @@
-# BO3MacFix 1.2-beta8-t7patch3.09
+# BO3MacFix 1.2-beta9-t7patch3.09
 
 Basado en BO3MacFix `985f0c2` (último commit de InvoxiPlayGames/BO3MacFix) con la capa T7 de la versión `t7compat.2`, actualizada a **T7Patch 3.09** (`Scroptss/T7Patch-src` `16b9b50`, 1 oct 2026).
 
@@ -51,6 +51,8 @@ Es el `SPOOF_RANKED` de T7Patch 3.09 (Scropts-QOL). Con `BO3MACFIX_SPOOF_RANKED=
 - Script: `AddWeaponStat` `0x13e7228`, `AddSpecialistStat` `0x13e784b`, `DoubleXPTimerFired` `0x13ea3d1`, `ReportLootReward` `0x13ea577`, `ReportLootConsume` `0x13ea645` y `0x13ea868`, `giveachievement` `0x118c99c`
 - `LiveStats` (primera ejecución): `0x1082535`
 
+Además, al cargar un mod el gestor de estadísticas cambiaba a un perfil separado por mod (y lo reiniciaba), así que la XP nunca llegaba al perfil normal. Con el spoof activo, sus 4 llamadas a `Mods_GetModName` (`0x1102e2b`, `0x1103576`, `0x110358e`, `0x1103750`) se redirigen a `0xf16aae`, una función del juego que devuelve `""`: solo el almacenamiento de estadísticas ve "sin mod".
+
 No se tocan las llamadas que cargan contenido de mods (fastfiles, sonido, rutas, scripts). No se replica `Mods_IsModsLoaded_1`: en Mac lo más parecido es el indicador de mapa del Workshop, y forzarlo rompería los mapas personalizados. **Riesgo:** Activision puede marcar estadísticas conseguidas con mods, y la cuenta podría ser baneada.
 - **`qmemcpy`:** en Mac no existe como función, porque el compilador mete `memcpy` en línea.
 - **`ExecLuaCMD`:** el BO3MacFix original ya neutraliza `Lua_CmdParseArgs`, que es el origen del cierre.
@@ -61,6 +63,7 @@ No se tocan las llamadas que cargan contenido de mods (fastfiles, sonido, rutas,
 - **Tirones por el servidor de Steam:** al no inicializarse el servidor de juego de Steam, su máquina de estados (`LiveSteam_ServerFrame`, `0xf6908e`) reintentaba en cada fotograma y escribía `STEAM_SERVER: Frame: Init!` en `console_mp.log` (unas 28 000 líneas por sesión). Ahora ese fotograma no hace nada.
 - **Spam del log:** el juego escribe cada línea en disco de forma síncrona. Una misma línea pasa como máximo 3 veces por segundo; el resto se descarta y se anota cuántas se suprimieron. Sirve, por ejemplo, para los errores repetidos de scripts de mods.
 - **Audio al cambiar de salida (altavoces ↔ AirPods):** SDL fijaba la cola de audio al dispositivo que era el predeterminado al arrancar y desactivaba el audio si ese dispositivo desaparecía. Ahora las colas de **salida** abiertas en el dispositivo predeterminado quedan en `AQDefaultDevice` y siguen al predeterminado del sistema. El micrófono no se toca. Se desactiva con `BO3MACFIX_DISABLE_AUDIO_FIX=1`.
+- **Cortes de audio:** la emulación WASAPI abría SDL con bloques de solo un cuarto del buffer del juego. Ahora el bloque de salida tiene un mínimo de 1024 muestras (`BO3MACFIX_AUDIO_SAMPLES`), y en `t7-status.log` se anotan el valor original y el nuevo.
 - **Diagnóstico de XP:** con `BO3MACFIX_DEBUG_XP=1` se anotan en `t7-status.log` las primeras 50 llamadas a `AddRankXP` (`0x13e97f4`) junto con el estado de sesión.
 
 ## Comprobar que funciona

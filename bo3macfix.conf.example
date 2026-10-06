@@ -8,6 +8,7 @@ BO3MACFIX_SPOOF_RANKED=1
 BO3MACFIX_DEBUG_XP=1
 
 # Otras opciones disponibles:
+# BO3MACFIX_AUDIO_SAMPLES=1024   (bloque mínimo de audio; 512 = menos latencia, 2048 = más estable)
 # BO3MACFIX_DISABLE_AUDIO_FIX=1
 # BO3MACFIX_FRIENDSONLY=1
 # BO3MACFIX_PLAYERNAME=TuNombre

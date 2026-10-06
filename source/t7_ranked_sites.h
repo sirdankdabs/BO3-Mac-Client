@@ -16,3 +16,15 @@ static const struct { uint64_t rva; const char *what; } t7_ranked_sites[] = {
     {0x118c99c, "giveachievement"},
     {0x1082535, "LiveStats first-time flow"},
 };
+
+// Call sites of Mods_GetModName (0xe4963f) in the stats storage manager. With
+// the ranked spoof they are redirected to 0xf16aae, a game function returning
+// "", so stats storage stays on the normal profile while a mod is loaded.
+#define T7_EMPTY_STRING_FN 0xf16aae
+#define T7_GET_MOD_NAME_FN 0xe4963f
+static const struct { uint64_t rva; const char *what; } t7_storage_modname_sites[] = {
+    {0x1102e2b, "storage assignment"},
+    {0x1103576, "mod change check"},
+    {0x110358e, "mod change log"},
+    {0x1103750, "mod change (second path)"},
+};
