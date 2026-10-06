@@ -369,6 +369,20 @@ static bool hook_Sys_GetPacket(uint8_t *from, uint8_t *msg) {
     return orig_Sys_GetPacket(from, msg);
 }
 
+// While connecting to / playing on a BOIII server, the lobby system's
+// "return to frontend" (restart core_frontend and reconnect to it) would pull
+// the client off the server. Defer it until the BOIII session is over.
+static void (*orig_Com_ReturnToFrontend)(void);
+static volatile int frontend_deferred;
+static void hook_Com_ReturnToFrontend(void) {
+    if (target.routing) {
+        if (!frontend_deferred) t7_log("[BO3MacFix] BOIII: deferring return to frontend\n");
+        frontend_deferred = 1;
+        return;
+    }
+    orig_Com_ReturnToFrontend();
+}
+
 // Sys_SendPacket(netsrc, length, data, netadr_t to): plain sendto for the server.
 static bool (*orig_Sys_SendPacket)(int, int, const uint8_t *, uint64_t, uint64_t);
 static bool hook_Sys_SendPacket(int socket_id, int length, const uint8_t *data, uint64_t lo, uint64_t hi) {
@@ -565,6 +579,11 @@ void boiii_frame(void) {
         t7_log("[BO3MacFix] BOIII: left %s\n", target.printable);
         target.routing = 0;
     }
+    if (!target.routing && frontend_deferred) {
+        frontend_deferred = 0;
+        t7_log("[BO3MacFix] BOIII: returning to frontend\n");
+        orig_Com_ReturnToFrontend();
+    }
 }
 
 void boiii_client_install(void) {
@@ -581,12 +600,14 @@ void boiii_client_install(void) {
     }
     if (!enabled()) return;
     void *get_packet = t7_resolve_function("Sys_GetPacket"), *send_packet = t7_resolve_function("Sys_SendPacket");
-    if (!get_packet || !send_packet) { t7_log("[BO3MacFix] BOIII: packet functions not mapped\n"); return; }
+    void *frontend = t7_resolve_function("Com_ReturnToFrontend");
+    if (!get_packet || !send_packet || !frontend) { t7_log("[BO3MacFix] BOIII: packet functions not mapped\n"); return; }
     int a = DobbyHook(resend, (void *)hook_CL_CheckForResend, (void **)&orig_CL_CheckForResend);
     int b = DobbyHook(oob, (void *)hook_NET_OutOfBandData, (void **)&orig_NET_OutOfBandData);
     int c = DobbyHook(get_packet, (void *)hook_Sys_GetPacket, (void **)&orig_Sys_GetPacket);
     int d = DobbyHook(send_packet, (void *)hook_Sys_SendPacket, (void **)&orig_Sys_SendPacket);
-    t7_log("[BO3MacFix] BOIII: client hooks %s\n", !a && !b && !c && !d ? "active" : "failed");
+    int e = DobbyHook(frontend, (void *)hook_Com_ReturnToFrontend, (void **)&orig_Com_ReturnToFrontend);
+    t7_log("[BO3MacFix] BOIII: client hooks %s\n", !a && !b && !c && !d && !e ? "active" : "failed");
 }
 
 void boiii_client_register(void) {

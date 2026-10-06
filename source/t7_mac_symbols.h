@@ -43,4 +43,5 @@ static const struct { const char *name; uint64_t rva; const char *prologue; } t7
     {"Com_KillLocalServerForLaunch", 0xe71641, "554889e5535031db881dc2136902b001"}, // "EXE_SERVERKILLED", called by the lobby client launch (0x10885ff)
     {"Sys_GetPacket", 0xd6dacf, "554889e5415741564155415453504889"}, // dwRecvFrom + socket byte + checksum ("Bad remoteTargetClient")
     {"Sys_SendPacket", 0xd6dc30, "554889e54157415641554154534881ec"}, // socket byte + checksum + dwSendTo ("dwSendTo ERROR")
+    {"Com_ReturnToFrontend", 0xe7535e, "554889e5e8624dfdff31c984c0b80a00"}, // restarts core_frontend (called via EXE_SERVERKILLED path 0xe715e7)
 };
