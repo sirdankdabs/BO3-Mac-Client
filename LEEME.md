@@ -1,4 +1,4 @@
-# BO3MacFix 1.2-beta5-t7patch3.09
+# BO3MacFix 1.2-beta6-t7patch3.09
 
 Basado en BO3MacFix `985f0c2` (último commit de InvoxiPlayGames/BO3MacFix) con la capa T7 de la versión `t7compat.2`, actualizada a **T7Patch 3.09** (`Scroptss/T7Patch-src` `16b9b50`, 1 oct 2026).
 
@@ -43,7 +43,15 @@ Funciones auxiliares verificadas igual: `SV_Cmd_ArgvBuffer`, `MSG_BeginReading`,
 - `Mods_SubscribeUGC`: la instalación automática de mods del Workshop pasa a ser opcional (`BO3MACFIX_AUTOINSTALLMODS=1`). El hook solo se activa si la función está en el mapa, y por ahora no lo está.
 
 ### No portado
-- **Ranked spoofing, desbloqueos de inventario/GobbleGums/DLC y spoof de propiedad.** Desbloquean contenido de pago que no se ha comprado, o permiten puntuar en ranked con mods. Pueden suponer baneo.
+- **Desbloqueos de inventario/GobbleGums/DLC y spoof de propiedad** (`SPOOF_UNLOCK`, `SPOOF_OWNERSHIP`): desbloquean contenido de pago que no se ha comprado.
+
+### Ranked spoofing (opcional, desactivado por defecto)
+Es el `SPOOF_RANKED` de T7Patch 3.09 (Scropts-QOL). Con `BO3MACFIX_SPOOF_RANKED=1`, 13 llamadas a `Mods_IsModsLoaded` (`0xe4962f`) responden "sin mods", así que la XP y las estadísticas siguen contando con un mod cargado. Cada `call` se comprueba antes de cambiarlo por `xor eax,eax`:
+- Modo de sesión: `0x127afde`, `0x127aff8`, `0x127b043`, `0x127b08c`, `0x127b0c8`
+- Script: `AddWeaponStat` `0x13e7228`, `AddSpecialistStat` `0x13e784b`, `DoubleXPTimerFired` `0x13ea3d1`, `ReportLootReward` `0x13ea577`, `ReportLootConsume` `0x13ea645` y `0x13ea868`, `giveachievement` `0x118c99c`
+- `LiveStats` (primera ejecución): `0x1082535`
+
+No se tocan las llamadas que cargan contenido de mods (fastfiles, sonido, rutas, scripts). No se replica `Mods_IsModsLoaded_1`: en Mac lo más parecido es el indicador de mapa del Workshop, y forzarlo rompería los mapas personalizados. **Riesgo:** Activision puede marcar estadísticas conseguidas con mods, y la cuenta podría ser baneada.
 - **`qmemcpy`:** en Mac no existe como función, porque el compilador mete `memcpy` en línea.
 - **`ExecLuaCMD`:** el BO3MacFix original ya neutraliza `Lua_CmdParseArgs`, que es el origen del cierre.
 - **`flsomeWeirdCharacterIndex` y `Live_UserGetName`:** no hay una equivalencia segura. BO3MacFix ya gestiona el nombre del jugador por su cuenta.
@@ -53,13 +61,14 @@ Funciones auxiliares verificadas igual: `SV_Cmd_ArgvBuffer`, `MSG_BeginReading`,
 Después de abrir el juego, mira `BO3MacFix/t7-status.log`. Deberías ver líneas `active` para las funciones de la tabla y un resumen `T7 hooks: 23 installed, 0 unresolved.`
 
 ## Volver a la versión anterior
-En esta carpeta están `BO3MacFix.dylib.beta4-backup` (versión anterior), `BO3MacFix.dylib.t7compat2-backup` (versión de Codex), `LEEME.t7compat2-backup.md` y `SHA256SUMS.t7compat2-backup`. Para volver atrás, copia el backup sobre `BO3MacFix.dylib`.
+En esta carpeta están `BO3MacFix.dylib.beta5-backup` (versión anterior, sin ranked spoof), `BO3MacFix.dylib.beta4-backup`, `BO3MacFix.dylib.t7compat2-backup` (versión de Codex), `LEEME.t7compat2-backup.md` y `SHA256SUMS.t7compat2-backup`. Para volver atrás, copia el backup sobre `BO3MacFix.dylib`.
 
 ## Variables útiles (opciones de lanzamiento de Steam)
 | Variable | Efecto |
 | --- | --- |
 | `BO3MACFIX_DISABLE_OPTIONAL_HOOKS=1` | Desactiva todos los hooks T7 internos |
 | `BO3MACFIX_DISABLE_STEAM_FILTERS=1` | Desactiva los filtros de Steam (P2P, chat, lobby solo para amigos) |
+| `BO3MACFIX_SPOOF_RANKED=1` | Ranked spoofing (ver arriba). Bajo tu responsabilidad |
 | `BO3MACFIX_AUTOINSTALLMODS=1` | Permite que el juego suscriba mods del Workshop automáticamente |
 | `BO3MACFIX_SYMBOL_MAP=/ruta` | Mapa adicional de funciones (mismo formato y verificación) |
 

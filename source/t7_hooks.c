@@ -3,6 +3,7 @@
 #include "steam.h"
 #include "dobby.h"
 #include "versioninfo.h"
+#include "t7_ranked_sites.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -200,8 +201,39 @@ HOOK(Scr_GscObjLink, int64_t, int instance, char *object) {
     return result;
 }
 
+// T7Patch SPOOF_RANKED (from Scropts-QOL): the listed Mods_IsModsLoaded call
+// sites answer "no mods", so XP/stats keep counting with a mod loaded. Instead
+// of filtering return addresses inside a hook, each verified "call 0xe4962f"
+// is replaced with "xor eax,eax; nopl (rax)". Opt-in only.
+static void t7_install_ranked_spoof(void) {
+    const char *enabled = getenv("BO3MACFIX_SPOOF_RANKED");
+    if (!enabled || strcmp(enabled, "1")) return;
+    if (!t7_known_mac_build()) {
+        t7_log("[BO3MacFix] Ranked spoof: skipped, executable is not the known Mac build.\n"); return;
+    }
+    static const uint8_t no_mods[5] = {0x31, 0xc0, 0x0f, 0x1f, 0x00};
+    const uintptr_t target = MAC_ADDR(0xe4962f);
+    unsigned patched = 0;
+    for (size_t i = 0; i < sizeof(t7_ranked_sites) / sizeof(t7_ranked_sites[0]); ++i) {
+        uint8_t *site = (uint8_t *)MAC_ADDR(t7_ranked_sites[i].rva);
+        int32_t rel;
+        if (!t7_memory_readable(site, 5) || site[0] != 0xe8) {
+            t7_log("[BO3MacFix] Ranked spoof %s: unexpected bytes, skipped\n", t7_ranked_sites[i].what); continue;
+        }
+        memcpy(&rel, site + 1, 4);
+        if ((uintptr_t)(site + 5 + rel) != target) {
+            t7_log("[BO3MacFix] Ranked spoof %s: call target mismatch, skipped\n", t7_ranked_sites[i].what); continue;
+        }
+        if (DobbyCodePatch(site, (uint8_t *)no_mods, sizeof(no_mods)) == 0) ++patched;
+        else t7_log("[BO3MacFix] Ranked spoof %s: patch failed\n", t7_ranked_sites[i].what);
+    }
+    t7_log("[BO3MacFix] Ranked spoof: %u/%zu call sites patched.\n", patched,
+           sizeof(t7_ranked_sites) / sizeof(t7_ranked_sites[0]));
+}
+
 void t7_install_hooks(void) {
     t7_log("[BO3MacFix " MACFIX_VERSION "] Starting experimental T7 adapters.\n");
+    t7_install_ranked_spoof();
     const char *disabled = getenv("BO3MACFIX_DISABLE_OPTIONAL_HOOKS");
     if (disabled && !strcmp(disabled, "1")) {
         t7_log("[BO3MacFix] Optional T7 hooks disabled by configuration.\n"); return;
