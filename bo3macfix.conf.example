@@ -4,7 +4,11 @@
 # Ranked spoofing (T7Patch SPOOF_RANKED). Riesgo de baneo bajo tu responsabilidad.
 BO3MACFIX_SPOOF_RANKED=1
 
+# Diagnóstico de XP: anota en t7-status.log las primeras llamadas a AddRankXP.
+BO3MACFIX_DEBUG_XP=1
+
 # Otras opciones disponibles:
+# BO3MACFIX_DISABLE_AUDIO_FIX=1
 # BO3MACFIX_FRIENDSONLY=1
 # BO3MACFIX_PLAYERNAME=TuNombre
 # BO3MACFIX_NETWORKPASSWORD=contraseña

@@ -1,4 +1,4 @@
-# BO3MacFix 1.2-beta7-t7patch3.09
+# BO3MacFix 1.2-beta8-t7patch3.09
 
 Basado en BO3MacFix `985f0c2` (último commit de InvoxiPlayGames/BO3MacFix) con la capa T7 de la versión `t7compat.2`, actualizada a **T7Patch 3.09** (`Scroptss/T7Patch-src` `16b9b50`, 1 oct 2026).
 
@@ -57,8 +57,14 @@ No se tocan las llamadas que cargan contenido de mods (fastfiles, sonido, rutas,
 - **`flsomeWeirdCharacterIndex` y `Live_UserGetName`:** no hay una equivalencia segura. BO3MacFix ya gestiona el nombre del jugador por su cuenta.
 - **Recuperación de nombres en errores Lua (`LuaStateManager_Error`, HKS):** solo afecta a los mensajes de error y necesita bases `.luacallstackdb` que no vienen incluidas.
 
+## Arreglos de rendimiento y audio (beta8)
+- **Tirones por el servidor de Steam:** al no inicializarse el servidor de juego de Steam, su máquina de estados (`LiveSteam_ServerFrame`, `0xf6908e`) reintentaba en cada fotograma y escribía `STEAM_SERVER: Frame: Init!` en `console_mp.log` (unas 28 000 líneas por sesión). Ahora ese fotograma no hace nada.
+- **Spam del log:** el juego escribe cada línea en disco de forma síncrona. Una misma línea pasa como máximo 3 veces por segundo; el resto se descarta y se anota cuántas se suprimieron. Sirve, por ejemplo, para los errores repetidos de scripts de mods.
+- **Audio al cambiar de salida (altavoces ↔ AirPods):** SDL fijaba la cola de audio al dispositivo que era el predeterminado al arrancar y desactivaba el audio si ese dispositivo desaparecía. Ahora las colas de **salida** abiertas en el dispositivo predeterminado quedan en `AQDefaultDevice` y siguen al predeterminado del sistema. El micrófono no se toca. Se desactiva con `BO3MACFIX_DISABLE_AUDIO_FIX=1`.
+- **Diagnóstico de XP:** con `BO3MACFIX_DEBUG_XP=1` se anotan en `t7-status.log` las primeras 50 llamadas a `AddRankXP` (`0x13e97f4`) junto con el estado de sesión.
+
 ## Comprobar que funciona
-Después de abrir el juego, mira `BO3MacFix/t7-status.log`. Deberías ver líneas `active` para las funciones de la tabla y un resumen `T7 hooks: 23 installed, 0 unresolved.`
+Después de abrir el juego, mira `BO3MacFix/t7-status.log`. Deberías ver líneas `active` para las funciones de la tabla y un resumen `T7 hooks: 24 installed, 0 unresolved.` (25 con `BO3MACFIX_DEBUG_XP=1`)
 
 ## Volver a la versión anterior
 En esta carpeta están `BO3MacFix.dylib.beta5-backup` (versión anterior, sin ranked spoof), `BO3MacFix.dylib.beta4-backup`, `BO3MacFix.dylib.t7compat2-backup` (versión de Codex), `LEEME.t7compat2-backup.md` y `SHA256SUMS.t7compat2-backup`. Para volver atrás, copia el backup sobre `BO3MacFix.dylib`.
@@ -70,6 +76,8 @@ En Mac, Steam lanza el `.app` directamente, así que `env VAR=1 %command%` en la
 | `BO3MACFIX_DISABLE_OPTIONAL_HOOKS=1` | Desactiva todos los hooks T7 internos |
 | `BO3MACFIX_DISABLE_STEAM_FILTERS=1` | Desactiva los filtros de Steam (P2P, chat, lobby solo para amigos) |
 | `BO3MACFIX_SPOOF_RANKED=1` | Ranked spoofing (ver arriba). Bajo tu responsabilidad |
+| `BO3MACFIX_DEBUG_XP=1` | Diagnóstico de XP en `t7-status.log` |
+| `BO3MACFIX_DISABLE_AUDIO_FIX=1` | Vuelve al comportamiento original del audio |
 | `BO3MACFIX_AUTOINSTALLMODS=1` | Permite que el juego suscriba mods del Workshop automáticamente |
 | `BO3MACFIX_SYMBOL_MAP=/ruta` | Mapa adicional de funciones (mismo formato y verificación) |
 

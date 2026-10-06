@@ -182,6 +182,23 @@ HOOK(CL_SwitchState_Idle_Update, int32_t, void *state) {
     return bo3_is_campaign() ? orig_CL_SwitchState_Idle_Update(state) : 0;
 }
 HOOK(LiveSteam_InitServer, void, void) { }
+// With the Steam game server never initialized, its per-frame state machine
+// retries the init every frame and logs "STEAM_SERVER: Frame: Init!" each
+// time (tens of thousands of log writes per session -> stutter). Skip it.
+HOOK(LiveSteam_ServerFrame, void, void *server) { (void)server; }
+
+// BO3MACFIX_DEBUG_XP=1: log the first AddRankXP calls with the session state
+// so XP problems can be diagnosed from t7-status.log.
+static bool debug_xp;
+static unsigned add_rank_xp_calls;
+HOOK(GScr_AddRankXP, void, int instance, int entity, uint16_t entity_class) {
+    if (debug_xp && add_rank_xp_calls < 50) {
+        ++add_rank_xp_calls;
+        t7_log("[BO3MacFix] XP debug: AddRankXP #%u entity %d class %u session 0x%08x\n", add_rank_xp_calls, entity,
+               entity_class, *(volatile uint32_t *)MAC_ADDR(0x6939a14));
+    }
+    orig_GScr_AddRankXP(instance, entity, entity_class);
+}
 
 static pthread_mutex_t campaign_lock = PTHREAD_MUTEX_INITIALIZER;
 HOOK(Scr_GscObjLink, int64_t, int instance, char *object) {
@@ -267,6 +284,10 @@ void t7_install_hooks(void) {
     INSTALL(Scr_GscObjLink);
     INSTALL(CL_SwitchState_Idle_Update);
     INSTALL(LiveSteam_InitServer);
+    INSTALL(LiveSteam_ServerFrame);
+    const char *xp = getenv("BO3MACFIX_DEBUG_XP");
+    debug_xp = xp && !strcmp(xp, "1") && t7_known_mac_build();
+    if (debug_xp) { INSTALL(GScr_AddRankXP); }
     // qmemcpy has no Mac equivalent (memcpy is inlined); ExecLuaCMD's crash is
     // already neutralized by upstream's Lua_CmdParseArgs patch.
     // BG_Cache_* index hooks stay disabled, as in upstream T7Patch.

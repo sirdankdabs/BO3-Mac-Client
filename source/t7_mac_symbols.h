@@ -31,4 +31,6 @@ static const struct { const char *name; uint64_t rva; const char *prologue; } t7
     {"Mods_SubscribeUGC", 0xe4971e, "554889e5535031db31f6ba0a000000e8"}, // native behind Lua "Mods_SubscribeUGC" (0x13abdaa)
     {"LobbyTypes_GetMsgTypeName", 0x1311e7c, "554889e583ffff74104863c7488d0d61"}, // unbounded lookup in the 33-entry name table at 0x1b78cf0
     {"LivePresence_Serialize", 0x15312a1, "554889e54157415641554154534883ec"}, // "Presence %s received data(%qu) smaller than expected"
+    {"LiveSteam_ServerFrame", 0xf6908e, "554889e553504889fbe896d96b00e876"}, // "STEAM_SERVER: Frame: Init!" state machine, called every frame via 0xf6a7ce
+    {"GScr_AddRankXP", 0x13e97f4, "554889e54157415641554154534881ec"}, // "AddRankXP: score type %s not found" (diagnostics only)
 };

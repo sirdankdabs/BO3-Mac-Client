@@ -1,4 +1,7 @@
 #include <dlfcn.h>
+#include <stdbool.h>
+#include <time.h>
+#include <pthread.h>
 #include <_stdio.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -139,10 +142,48 @@ install_hook_name(load_workshop_texture, void *, const char *path) {
 }
 
 // Prints out logs to stdout that would normally go in the logging window
+// The game writes every log line to console_mp.log synchronously, so a line
+// repeated every frame (e.g. a broken mod script) causes stutter. Let each
+// distinct line through at most LOG_REPEAT_LIMIT times per second and note how
+// many copies were dropped once the flood ends.
+#define LOG_SLOTS 64
+#define LOG_REPEAT_LIMIT 3
+static struct { uint32_t hash, count; uint64_t start_ms; } log_slots[LOG_SLOTS];
+static pthread_mutex_t log_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint32_t log_flood_check(const char *str, bool *drop) {
+    uint32_t hash = 2166136261u;
+    for (const unsigned char *p = (const unsigned char *)str; *p; ++p) hash = (hash ^ *p) * 16777619u;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    uint64_t now_ms = (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000;
+    uint32_t dropped = 0;
+    pthread_mutex_lock(&log_lock);
+    __typeof__(log_slots[0]) *slot = &log_slots[hash % LOG_SLOTS];
+    if (slot->hash != hash || now_ms - slot->start_ms >= 1000) {
+        if (slot->hash == hash && slot->count > LOG_REPEAT_LIMIT) dropped = slot->count - LOG_REPEAT_LIMIT;
+        slot->hash = hash; slot->count = 1; slot->start_ms = now_ms;
+        *drop = false;
+    } else {
+        *drop = ++slot->count > LOG_REPEAT_LIMIT;
+    }
+    pthread_mutex_unlock(&log_lock);
+    return dropped;
+}
+
 install_hook_name(someLoggingFunction, void, int bla, int bla2, char *str, int bla3) {
 #ifdef MACFIX_DEBUG
     printf("%s", str);
 #endif
+    if (str && *str) {
+        bool drop;
+        uint32_t dropped = log_flood_check(str, &drop);
+        if (dropped) {
+            char note[96];
+            snprintf(note, sizeof(note), "[BO3MacFix] (%u repeated log lines suppressed)\n", dropped);
+            orig_someLoggingFunction(bla, bla2, note, bla3);
+        }
+        if (drop) return;
+    }
     orig_someLoggingFunction(bla, bla2, str, bla3);
     return;
 }
