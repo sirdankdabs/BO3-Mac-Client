@@ -185,7 +185,12 @@ HOOK(LiveSteam_InitServer, void, void) { }
 // With the Steam game server never initialized, its per-frame state machine
 // retries the init every frame and logs "STEAM_SERVER: Frame: Init!" each
 // time (tens of thousands of log writes per session -> stutter). Skip it.
-HOOK(LiveSteam_ServerFrame, void, void *server) { (void)server; }
+void boiii_register(void);
+HOOK(LiveSteam_ServerFrame, void, void *server) {
+    (void)server;
+    static bool registered;
+    if (!registered) { registered = true; boiii_register(); }
+}
 
 // BO3MACFIX_DEBUG_XP=1: log the first AddRankXP calls with the session state
 // so XP problems can be diagnosed from t7-status.log.

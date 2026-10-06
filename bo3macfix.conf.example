@@ -7,6 +7,10 @@ BO3MACFIX_SPOOF_RANKED=1
 # Diagnóstico de XP: anota en t7-status.log las primeras llamadas a AddRankXP.
 BO3MACFIX_DEBUG_XP=1
 
+# Servidores BOIII/Ezz (fase 1, solo diagnóstico): consulta el servidor al arrancar
+# y anota la respuesta en t7-status.log. No entra al servidor.
+BO3MACFIX_BOIII_PROBE=5.161.179.25:6002
+
 # Otras opciones disponibles:
 # BO3MACFIX_AUDIO_SAMPLES=1024   (bloque mínimo de audio; 512 = menos latencia, 2048 = más estable)
 # BO3MACFIX_DISABLE_AUDIO_FIX=1
