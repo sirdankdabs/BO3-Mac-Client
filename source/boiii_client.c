@@ -396,7 +396,9 @@ void boiii_frame(void) {
     // Auto-connect once the player has been sitting in the Zombies menu (not
     // in a match) for 5 seconds.
     if (auto_connect_at) {
-        if (!bo3_is_zombies() || *client_state(0) >= CONNSTATE_CHALLENGING) auto_connect_at = now_ms() + 5000;
+        // The menus run a local "core_frontend" server the client is connected
+        // to, so only the mode is checked here.
+        if (!bo3_is_zombies()) auto_connect_at = now_ms() + 5000;
         else if (now_ms() >= auto_connect_at) {
             auto_connect_at = 0;
             t7_log("[BO3MacFix] BOIII: Zombies menu detected, auto-connecting\n");
@@ -409,7 +411,12 @@ void boiii_frame(void) {
         target.started_ms = now_ms();
         last_challenge_request = 0;
         const char *error = NULL;
-        t7_log("[BO3MacFix] BOIII: launching client for %s %s\n", target.map, target.gametype);
+        // CL_Connect skips the network handshake when cls.servername is already
+        // "localhost" and the client is connected (the menu's local server).
+        // Give it another name so it takes the challenge/connect path.
+        snprintf((char *)MAC_ADDR(0x115345b4), 0x100, "%s", "boiii");
+        t7_log("[BO3MacFix] BOIII: launching client for %s %s (state %d)\n", target.map, target.gametype,
+               *client_state(0));
         if (!CL_LaunchClient(target.map, target.gametype, &error)) {
             t7_log("[BO3MacFix] BOIII: CL_LaunchClient failed: %s\n", error ? error : "(no reason)");
             target.active = 0;
