@@ -41,4 +41,6 @@ static const struct { const char *name; uint64_t rva; const char *prologue; } t7
     {"CL_GetNetSrc", 0xeae661, "554889e54863f7488d0cf6488d15fd2c"}, // client -> socket id
     {"Com_IsLocalServerRunning", 0xe71737, "554889e5488b3d1edfa610e8ddea1200"}, // checked by the lobby client launch before CL_LaunchClient
     {"Com_KillLocalServerForLaunch", 0xe71641, "554889e5535031db881dc2136902b001"}, // "EXE_SERVERKILLED", called by the lobby client launch (0x10885ff)
+    {"Sys_GetPacket", 0xd6dacf, "554889e5415741564155415453504889"}, // dwRecvFrom + socket byte + checksum ("Bad remoteTargetClient")
+    {"Sys_SendPacket", 0xd6dc30, "554889e54157415641554154534881ec"}, // socket byte + checksum + dwSendTo ("dwSendTo ERROR")
 };

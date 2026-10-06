@@ -105,6 +105,7 @@ static bool load_or_create_key(void) {
 static struct {
     volatile int active;      // retarget CL_Connect to this server
     volatile int launch;      // main thread should call CL_LaunchClient
+    volatile int routing;     // packets to/from the server bypass Demonware
     uint8_t ip[4];
     uint16_t port;
     char map[64], gametype[64], printable[64];
@@ -249,31 +250,139 @@ static bool hook_NET_OutOfBandData(int socket_id, uint64_t lo, uint64_t hi, cons
     return sent;
 }
 
+static void accept_challenge(const uint8_t *bytes) {
+    memcpy(challenge, bytes, sizeof(challenge));
+    have_challenge = 1;
+    int32_t *state = client_state(0);
+    if (*state == CONNSTATE_CHALLENGING) *state = CONNSTATE_CONNECTING;
+    t7_log("[BO3MacFix] BOIII: challenge received, connecting\n");
+}
+
+// BOIII servers answer some out-of-band commands with raw "\xff\xff\xff\xff..."
+// packets (no socket byte, no checksum) that the game itself would drop.
+static void handle_raw_packet(const uint8_t *data, size_t length) {
+    static const char prefix[] = "getChallengeResponse ";
+    const size_t offset = 4 + sizeof(prefix) - 1;
+    if (length >= offset + sizeof(challenge) && !memcmp(data + 4, prefix, sizeof(prefix) - 1)) {
+        if (target.active) accept_challenge(data + offset);
+        return;
+    }
+    char text[96];
+    size_t n = length - 4 < sizeof(text) - 1 ? length - 4 : sizeof(text) - 1;
+    for (size_t i = 0; i < n; ++i) text[i] = (data[4 + i] >= 0x20 && data[4 + i] < 0x7f) ? (char)data[4 + i] : '.';
+    text[n] = 0;
+    if (strncmp(text, "profileInfo", 11) && strncmp(text, "playerXuid", 10))
+        t7_log("[BO3MacFix] BOIII: server says: %s\n", text);
+}
+
 // Called from the T7 connectionless filter before it decides. Returns true when
 // the packet was consumed here.
 bool boiii_connectionless(const char *command, const void *msg) {
-    if (!target.active || !command) return false;
-    if (!strcmp(command, "getChallengeResponse")) {
-        const uint8_t *data = *(const uint8_t *const *)((const uint8_t *)msg + 8);
-        int32_t size;
-        memcpy(&size, (const uint8_t *)msg + 0x1c, 4);
-        const size_t offset = 4 + sizeof("getChallengeResponse ") - 1;
-        if (data && size >= (int32_t)(offset + sizeof(challenge))) {
-            memcpy(challenge, data + offset, sizeof(challenge));
-            have_challenge = 1;
-            int32_t *state = client_state(0);
-            if (*state == CONNSTATE_CHALLENGING) *state = CONNSTATE_CONNECTING;
-            t7_log("[BO3MacFix] BOIII: challenge received, connecting\n");
-        }
-        return true;
-    }
-    if (!strcmp(command, "profileInfo") || !strcmp(command, "playerXuid")) return true;
+    if (!target.routing || !command) return false;
+    if (!strcmp(command, "getChallengeResponse") || !strcmp(command, "profileInfo") || !strcmp(command, "playerXuid"))
+        return true; // raw-only BOIII commands, handled in the socket layer
     if (!strcmp(command, "error") || !strcmp(command, "connectResponse") || !strcmp(command, "print"))
         t7_log("[BO3MacFix] BOIII: server sent '%s'\n", command);
     return false;
 }
 
 // --------------------------------------------------------------- networking --
+// BOIII's wire format (client and server): one socket byte + payload, no
+// checksum, sent with plain sendto on the IP socket; its own replies may come
+// raw. Mac sends IP packets through Demonware (dwSendTo), which refuses
+// addresses it has no connection for, so traffic with the BOIII server is
+// carried on the game's UDP socket directly and fed back through Sys_GetPacket.
+static volatile int game_socket = -1;
+
+#define QUEUE_SIZE 256
+static struct { uint8_t data[1600]; uint16_t length; } packet_queue[QUEUE_SIZE];
+static unsigned queue_head, queue_tail;
+static pthread_mutex_t queue_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static bool from_server(const struct sockaddr *from) {
+    if (!from || from->sa_family != AF_INET) return false;
+    const struct sockaddr_in *in = (const struct sockaddr_in *)from;
+    return !memcmp(&in->sin_addr, target.ip, 4) && ntohs(in->sin_port) == target.port;
+}
+
+static ssize_t recvfrom_hook(int fd, void *buffer, size_t capacity, int flags, struct sockaddr *from, socklen_t *from_length) {
+    for (;;) {
+        ssize_t received = recvfrom(fd, buffer, capacity, flags, from, from_length);
+        if (received <= 0 || !target.routing || fd != game_socket || !from_server(from)) return received;
+        const uint8_t *bytes = buffer;
+        if (received >= 4 && !memcmp(bytes, "\xff\xff\xff\xff", 4)) {
+            handle_raw_packet(bytes, (size_t)received);
+        } else if ((size_t)received <= sizeof(packet_queue[0].data)) {
+            pthread_mutex_lock(&queue_lock);
+            if (queue_tail - queue_head < QUEUE_SIZE) {
+                memcpy(packet_queue[queue_tail % QUEUE_SIZE].data, bytes, (size_t)received);
+                packet_queue[queue_tail % QUEUE_SIZE].length = (uint16_t)received;
+                ++queue_tail;
+            }
+            pthread_mutex_unlock(&queue_lock);
+        }
+        // Hidden from Demonware; read the next datagram (the socket is non-blocking).
+    }
+}
+DYLD_INTERPOSE(recvfrom_hook, recvfrom);
+
+// Sys_GetPacket(netadr_t *from, msg_t *msg): hand queued server packets to the
+// game exactly as it would after stripping the socket byte, minus the checksum.
+static bool (*orig_Sys_GetPacket)(uint8_t *, uint8_t *);
+static bool hook_Sys_GetPacket(uint8_t *from, uint8_t *msg) {
+    if (target.routing) {
+        uint8_t packet[1600];
+        uint16_t length = 0;
+        pthread_mutex_lock(&queue_lock);
+        if (queue_head != queue_tail) {
+            length = packet_queue[queue_head % QUEUE_SIZE].length;
+            memcpy(packet, packet_queue[queue_head % QUEUE_SIZE].data, length);
+            ++queue_head;
+        }
+        pthread_mutex_unlock(&queue_lock);
+        int32_t capacity;
+        memcpy(&capacity, msg + 0x18, 4);
+        uint8_t *data = *(uint8_t **)(msg + 8);
+        if (length >= 2 && data && length <= capacity) {
+            uint8_t socket_byte = packet[0];
+            if ((socket_byte & 0xf) < 5 && (socket_byte >> 4) < 5) {
+                memset(from, 0, 16);
+                memcpy(from, target.ip, 4);
+                memcpy(from + 4, &target.port, 2);
+                // Same end state as the original: socket byte read (readcount 1),
+                // data pointer advanced past it, cursize = payload length.
+                int32_t type = 4, local_id = socket_byte & 0xf, remote = socket_byte >> 4, one = 1, size = length - 1;
+                memcpy(from + 8, &type, 4);
+                memcpy(from + 0xc, &local_id, 4);
+                memcpy(data, packet, length);
+                memcpy(msg + 0x34, &remote, 4);
+                memcpy(msg + 0x24, &one, 4);  // readcount
+                uint8_t *advanced = data + 1;
+                memcpy(msg + 8, &advanced, sizeof(advanced));
+                memcpy(msg + 0x1c, &size, 4); // cursize
+                return true;
+            }
+        }
+    }
+    return orig_Sys_GetPacket(from, msg);
+}
+
+// Sys_SendPacket(netsrc, length, data, netadr_t to): plain sendto for the server.
+static bool (*orig_Sys_SendPacket)(int, int, const uint8_t *, uint64_t, uint64_t);
+static bool hook_Sys_SendPacket(int socket_id, int length, const uint8_t *data, uint64_t lo, uint64_t hi) {
+    if (target.routing && game_socket >= 0 && (uint32_t)hi == 4 && is_target(lo) && length >= 0 && length < 1600) {
+        uint8_t packet[1601];
+        packet[0] = (uint8_t)((socket_id & 0xf) | (((int)(hi >> 32) & 0xf) << 4));
+        memcpy(packet + 1, data, (size_t)length);
+        struct sockaddr_in to = {0};
+        to.sin_family = AF_INET;
+        to.sin_port = htons(target.port);
+        memcpy(&to.sin_addr, target.ip, 4);
+        return sendto(game_socket, packet, (size_t)length + 1, 0, (struct sockaddr *)&to, sizeof(to)) >= 0;
+    }
+    return orig_Sys_SendPacket(socket_id, length, data, lo, hi);
+}
+
 // The game binds its UDP socket to 127.0.0.1 (net_ip "localhost"); internet
 // servers need it on all interfaces.
 static int bind_hook(int socket_fd, const struct sockaddr *address, socklen_t length) {
@@ -285,8 +394,9 @@ static int bind_hook(int socket_fd, const struct sockaddr *address, socklen_t le
         if (copy.sin_addr.s_addr == htonl(INADDR_LOOPBACK) &&
             !getsockopt(socket_fd, SOL_SOCKET, SO_TYPE, &type, &type_length) && type == SOCK_DGRAM) {
             copy.sin_addr.s_addr = htonl(INADDR_ANY);
-            t7_log("[BO3MacFix] BOIII: game UDP socket bound to 0.0.0.0:%u\n", ntohs(copy.sin_port));
-            return bind(socket_fd, (const struct sockaddr *)&copy, sizeof(copy));
+            int result = bind(socket_fd, (const struct sockaddr *)&copy, sizeof(copy));
+            if (!result) game_socket = socket_fd;
+            return result;
         }
     }
     return bind(socket_fd, address, length);
@@ -410,6 +520,11 @@ void boiii_frame(void) {
     if (target.launch) {
         target.launch = 0;
         target.active = 1;
+        target.routing = 1;
+        pthread_mutex_lock(&queue_lock);
+        queue_head = queue_tail = 0;
+        pthread_mutex_unlock(&queue_lock);
+        t7_log("[BO3MacFix] BOIII: game socket fd %d\n", game_socket);
         target.started_ms = now_ms();
         last_challenge_request = 0;
         const char *error = NULL;
@@ -428,6 +543,7 @@ void boiii_frame(void) {
         if (!CL_LaunchClient(target.map, target.gametype, &error)) {
             t7_log("[BO3MacFix] BOIII: CL_LaunchClient failed: %s\n", error ? error : "(no reason)");
             target.active = 0;
+            target.routing = 0;
         }
         return;
     }
@@ -439,7 +555,11 @@ void boiii_frame(void) {
         } else if (now_ms() - target.started_ms > 30000) {
             t7_log("[BO3MacFix] BOIII: connection timed out (state %d)\n", state);
             target.active = 0;
+            target.routing = 0;
         }
+    } else if (target.routing && *client_state(0) < CONNSTATE_CHALLENGING) {
+        t7_log("[BO3MacFix] BOIII: left %s\n", target.printable);
+        target.routing = 0;
     }
 }
 
@@ -456,9 +576,13 @@ void boiii_client_install(void) {
         t7_log("[BO3MacFix] BOIII: client functions not mapped\n"); return;
     }
     if (!enabled()) return;
+    void *get_packet = t7_resolve_function("Sys_GetPacket"), *send_packet = t7_resolve_function("Sys_SendPacket");
+    if (!get_packet || !send_packet) { t7_log("[BO3MacFix] BOIII: packet functions not mapped\n"); return; }
     int a = DobbyHook(resend, (void *)hook_CL_CheckForResend, (void **)&orig_CL_CheckForResend);
     int b = DobbyHook(oob, (void *)hook_NET_OutOfBandData, (void **)&orig_NET_OutOfBandData);
-    t7_log("[BO3MacFix] BOIII: client hooks %s\n", !a && !b ? "active" : "failed");
+    int c = DobbyHook(get_packet, (void *)hook_Sys_GetPacket, (void **)&orig_Sys_GetPacket);
+    int d = DobbyHook(send_packet, (void *)hook_Sys_SendPacket, (void **)&orig_Sys_SendPacket);
+    t7_log("[BO3MacFix] BOIII: client hooks %s\n", !a && !b && !c && !d ? "active" : "failed");
 }
 
 void boiii_client_register(void) {
