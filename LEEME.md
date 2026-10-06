@@ -1,4 +1,4 @@
-# BO3MacFix 1.2-beta4-t7patch3.09
+# BO3MacFix 1.2-beta5-t7patch3.09
 
 Basado en BO3MacFix `985f0c2` (último commit de InvoxiPlayGames/BO3MacFix) con la capa T7 de la versión `t7compat.2`, actualizada a **T7Patch 3.09** (`Scroptss/T7Patch-src` `16b9b50`, 1 oct 2026).
 
@@ -11,13 +11,25 @@ El ejecutable de Mac no tiene símbolos, así que en t7compat.2 **no se activaba
 
 | Función Mac | Dirección | Protección |
 | --- | --- | --- |
-| `LobbyMsgRW_PackageInt` / `PackageUInt` | `0xf41d33` / `0xf41db0` | Límites de tipos de lobby, miembros, votos y settings; **rechazo de `datamask` = 0 (nuevo en 3.09)** |
+| `LobbyMsgRW_PackageInt` / `PackageUInt` | `0xf41d33` / `0xf41db0` | Límites de tipos de lobby, miembros, votos y settings; **rechazo de `datamask` = 0 (3.09)** |
 | `LobbyMsgRW_PackageUChar` | `0xf41fc0` | Normaliza `nattype` a ≤ 4 |
 | `LobbyMsgRW_PrintMessage` | `0xf417ae` | Desactivado, como en T7Patch |
 | `LobbyMsgRW_ReadDebugSection` | `0xf41836` | Límite de anidamiento (16) contra mensajes que desbordan la pila |
+| `LobbyTypes_GetMsgTypeName` | `0x1311e7c` | Índice fuera de `-1..0x20` → `"invalid"` (la tabla de Mac tiene 33 nombres) |
 | `CL_ConnectionlessCMD` | `0xe19402` | Solo deja pasar los comandos de la lista de T7Patch (más voz/relay de Mac) |
-| `CMD_MenuResponse_f` | `0xf451d1` | Lógica de 3.09: expulsa a un cliente no anfitrión que mande `killserverpc` o `restart_level_zm`, o `endgame`/`endround` fuera de campaña. **Permite las transiciones de campaña (arreglo de 3.09)** |
-| `CL_GetConfigString` | `0xe2e90a` | Bloquea `mspreload` en las config strings 3514/3627 fuera de campaña |
+| `CMD_MenuResponse_f` | `0xf451d1` | Política de 3.09: expulsa a no anfitriones con `killserverpc`/`restart_level_zm`, o `endgame`/`endround` fuera de campaña |
+| `CL_GetConfigString` | `0xe2e90a` | Bloquea `mspreload` (3514/3627) fuera de campaña |
+| `CL_SwitchState_Idle_Update` | `0x131489c` | Precarga en estado ocioso solo en campaña (entrada "idle" de la tabla `0x1b78e98`) |
+| `SEH_ParseNextDirective` + `…Short` | `0xf47819` / `0x12c8e15` | Saneado de `^B…^` y `[{…}]`. Son los analizadores que comparten `SEH_ReplaceDirectiveInStringWithBinding` (`0xf47799`) y los otros dos llamadores de Mac |
+| `UI_DoModelStringReplacement` | `0xd50fdc` | `$(` sin cerrar → `..` |
+| `UI_Model_ResolvePath` | `0x1036426` | Claves de ruta ≥ 64 caracteres rechazadas. Es el recorredor común de `GetModelFromPath`/`CreateModelFromPath`, que copiaba cada clave a un buffer de pila de 64 bytes sin límite |
+| `UI_Model_AllocateNode` | `0x1036158` | Devuelve 0 en lugar de expulsar al menú con `EXE_LUI_OUT_OF_MEMORY` cuando no quedan nodos |
+| `LiveInvites_AcceptInvite` / `JoinMessageAction` / `SendJoinInfo` | `0x134b1b9` / `0x134bbf3` / `0x134bdb2` | Con "solo amigos" activo, ignora invitaciones y peticiones de unión de quien no es tu amigo |
+| `LivePresence_Serialize` | `0x15312a1` | Al desempaquetar, recorta a 18 el número de jugadores (bits 2-6 del byte de control) |
+| `UI_BrowserOpen` (Lua `OpenURL`) | `0xe0e2da` | Desactivado, como en T7Patch: impide que un script abra URLs o cierre el juego |
+| `Mods_SubscribeUGC` | `0xe4971e` | Auto-suscripción a mods del Workshop solo con `BO3MACFIX_AUTOINSTALLMODS=1` (3.09) |
+| `LiveSteam_InitServer` | `0xf6956d` | No se registra un servidor de juego de Steam (no se publica tu IP), como en T7Patch |
+| `Scr_GscObjLink` | `0x149293c` | Arreglo de daño de Demon Within (Realista). Se aplica solo si el bytecode coincide byte a byte (GSC 0x1C) |
 
 Funciones auxiliares verificadas igual: `SV_Cmd_ArgvBuffer`, `MSG_BeginReading`, `MSG_ReadLong`, `MSG_ReadStringLine`, `Cbuf_AddText`.
 
@@ -30,15 +42,18 @@ Funciones auxiliares verificadas igual: `SV_Cmd_ArgvBuffer`, `MSG_BeginReading`,
 ### Otros cambios de T7Patch 3.09 portados
 - `Mods_SubscribeUGC`: la instalación automática de mods del Workshop pasa a ser opcional (`BO3MACFIX_AUTOINSTALLMODS=1`). El hook solo se activa si la función está en el mapa, y por ahora no lo está.
 
-### No portado a propósito
-- Ranked spoofing, desbloqueos de inventario y spoof de propiedad (`SPOOF_RANKED`, `SPOOF_UNLOCK`, `SPOOF_OWNERSHIP`): en T7Patch vienen desactivados por defecto y pueden suponer un riesgo de baneo.
-- Hooks sin dirección verificada en Mac: `SEH_ReplaceDirectiveInStringWithBinding`, `UI_DoModelStringReplacement`, `UI_Model_*`, `qmemcpy`, `ExecLuaCMD`, `UI_BrowserOpen`, `LiveInvites_*`, `Scr_GscObjLink`, `CL_SwitchState_Idle_Update` y `LiveSteam_InitServer`. En el log aparecen como "not mapped for this executable".
+### No portado
+- **Ranked spoofing, desbloqueos de inventario/GobbleGums/DLC y spoof de propiedad.** Desbloquean contenido de pago que no se ha comprado, o permiten puntuar en ranked con mods. Pueden suponer baneo.
+- **`qmemcpy`:** en Mac no existe como función, porque el compilador mete `memcpy` en línea.
+- **`ExecLuaCMD`:** el BO3MacFix original ya neutraliza `Lua_CmdParseArgs`, que es el origen del cierre.
+- **`flsomeWeirdCharacterIndex` y `Live_UserGetName`:** no hay una equivalencia segura. BO3MacFix ya gestiona el nombre del jugador por su cuenta.
+- **Recuperación de nombres en errores Lua (`LuaStateManager_Error`, HKS):** solo afecta a los mensajes de error y necesita bases `.luacallstackdb` que no vienen incluidas.
 
 ## Comprobar que funciona
-Después de abrir el juego, mira `BO3MacFix/t7-status.log`. Deberías ver líneas `active` para las funciones de la tabla y un resumen `T7 optional hooks: 9 installed, …`.
+Después de abrir el juego, mira `BO3MacFix/t7-status.log`. Deberías ver líneas `active` para las funciones de la tabla y un resumen `T7 hooks: 23 installed, 0 unresolved.`
 
 ## Volver a la versión anterior
-En esta carpeta están `BO3MacFix.dylib.t7compat2-backup`, `LEEME.t7compat2-backup.md` y `SHA256SUMS.t7compat2-backup`. Para volver atrás, copia el backup sobre `BO3MacFix.dylib`.
+En esta carpeta están `BO3MacFix.dylib.beta4-backup` (versión anterior), `BO3MacFix.dylib.t7compat2-backup` (versión de Codex), `LEEME.t7compat2-backup.md` y `SHA256SUMS.t7compat2-backup`. Para volver atrás, copia el backup sobre `BO3MacFix.dylib`.
 
 ## Variables útiles (opciones de lanzamiento de Steam)
 | Variable | Efecto |
@@ -49,4 +64,4 @@ En esta carpeta están `BO3MacFix.dylib.t7compat2-backup`, `LEEME.t7compat2-back
 | `BO3MACFIX_SYMBOL_MAP=/ruta` | Mapa adicional de funciones (mismo formato y verificación) |
 
 ## Pruebas realizadas
-`make test`: las 8 suites anteriores más `dobby_prologue_test`, que comprueba que Dobby reubica bien los inicios de función con `jcc` corto y `lea` relativo a RIP, que son los que tienen las funciones del mapa. **Todavía no se ha probado dentro de una partida.**
+`make test`: las 8 suites anteriores más `dobby_prologue_test`, que comprueba que Dobby reubica bien los inicios de función con `jcc` corto, `lea` relativo a RIP y un `call` rel32 partido por el borde del parche, que son los que tienen las funciones del mapa. **Todavía no se ha probado dentro de una partida.**

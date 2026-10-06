@@ -12,6 +12,7 @@
 
 // Only functions resolved from the Mac executable are installed. These native
 // signatures use the SysV ABI; no Win32 calling conventions or RVAs are used.
+#define MAC_ADDR(rva) ((uintptr_t)(rva) + 0x100000000ull + (uintptr_t)_dyld_get_image_vmaddr_slide(0))
 #define HOOK(name, result, ...) static result (*orig_##name)(__VA_ARGS__); static result hook_##name(__VA_ARGS__)
 HOOK(LobbyMsgRW_PackageInt, bool, void *msg, const char *key, int32_t *value) {
     if (!value || !key || !orig_LobbyMsgRW_PackageInt(msg, key, value)) return false;
@@ -31,10 +32,23 @@ HOOK(LobbyMsgRW_PackageUChar, bool, void *msg, const char *key, uint8_t *value) 
     if (!strcasecmp(key, "nattype") && *value > 4) *value = 4;
     return true;
 }
-HOOK(SEH_ReplaceDirectiveInStringWithBinding, const char *, int client, const char *source, char *dest) {
-    char input[4096];
-    if (!dest || !t7_sanitize_directives(source, input)) return NULL;
-    return orig_SEH_ReplaceDirectiveInStringWithBinding(client, input, dest);
+// SEH_ReplaceDirectiveInStringWithBinding (0xf47799) and two other Mac callers
+// copy the string into a buffer and call these parsers in a loop with a
+// cursor. Sanitize the whole buffer once, on the first call (cursor 0), with
+// T7Patch's rules; replacements keep the length unchanged.
+static void sanitize_directive_buffer(const int32_t *cursor, char *buffer) {
+    char clean[4096];
+    if (!cursor || !buffer || *cursor != 0) return;
+    if (t7_sanitize_directives(buffer, clean)) memcpy(buffer, clean, strlen(clean) + 1);
+    else buffer[0] = 0; // longer than any caller's buffer: drop it
+}
+HOOK(SEH_ParseNextDirective, bool, int client, int32_t *cursor, int32_t *length, char *buffer, int32_t size) {
+    sanitize_directive_buffer(cursor, buffer);
+    return orig_SEH_ParseNextDirective(client, cursor, length, buffer, size);
+}
+HOOK(SEH_ParseNextDirectiveShort, bool, int client, int32_t *cursor, int32_t *length, char *buffer) {
+    sanitize_directive_buffer(cursor, buffer);
+    return orig_SEH_ParseNextDirectiveShort(client, cursor, length, buffer);
 }
 HOOK(UI_DoModelStringReplacement, bool, int client, char *element, const char *source, char *dest, unsigned capacity) {
     char input[4096]; bool changed;
@@ -42,19 +56,31 @@ HOOK(UI_DoModelStringReplacement, bool, int client, char *element, const char *s
     if (changed) { snprintf(dest, capacity, "%s", input); return true; }
     return orig_UI_DoModelStringReplacement(client, element, input, dest, capacity);
 }
-#define PATH_HOOK(name) HOOK(name, int32_t, int64_t parent, const char *path) { \
-    return t7_model_path_valid(path) ? orig_##name(parent, path) : 0; }
-PATH_HOOK(UI_Model_GetModelFromPath)
-PATH_HOOK(UI_Model_GetModelFromPath_0)
-PATH_HOOK(UI_Model_CreateModelFromPath)
-HOOK(UI_Model_AllocateNode, int32_t, int32_t parent, const char *path, bool persistent) {
+// GetModelFromPath / CreateModelFromPath all tail-call this walker, which
+// copies each '.'-separated key into a 64-byte stack buffer without a bound.
+HOOK(UI_Model_ResolvePath, uint16_t, uint16_t parent, const char *path, bool create, bool persistent) {
+    return t7_model_path_valid(path) ? orig_UI_Model_ResolvePath(parent, path, create, persistent) : 0;
+}
+// The Mac allocator already rejects keys >= 64; T7Patch also returns 0 instead
+// of raising EXE_LUI_OUT_OF_MEMORY when the free list (head at 0x431d728) is empty.
+HOOK(UI_Model_AllocateNode, uint16_t, uint16_t parent, const char *path, bool persistent) {
     if (!path || strnlen(path, 64) >= 64) return 0;
-    // The Windows free-node counter has no known Mac address.
+    if (t7_known_mac_build() && !*(volatile uint16_t *)MAC_ADDR(0x431d728)) return 0;
     return orig_UI_Model_AllocateNode(parent, path, persistent);
 }
-HOOK(qmemcpy, int64_t, char *dest, const char *source, int32_t size) {
-    if (size < 0 || (!dest && size) || (!source && size)) return 0;
-    return orig_qmemcpy(dest, source, size);
+// T7Patch: index < -1 or past MESSAGE_TYPE_DEMO_STATE (0x20) is "invalid".
+// The Mac table at 0x1b78cf0 has exactly those 33 names.
+HOOK(LobbyTypes_GetMsgTypeName, const char *, int32_t index) {
+    if (index < -1 || index > 0x20) return "invalid";
+    return orig_LobbyTypes_GetMsgTypeName(index);
+}
+// Mac LivePresence_Serialize(unpack, presence, buffer, size): byte 1 of the
+// buffer is the control byte whose bits 2-6 hold the player count. Clamp it to
+// 18 before unpacking, like T7Patch.
+HOOK(LivePresence_Serialize, int32_t, bool unpack, void *presence, uint8_t *buffer, uint64_t size) {
+    if (unpack && buffer && size >= 2 && ((buffer[1] >> 2) & 0x1f) > 18)
+        buffer[1] = (uint8_t)((buffer[1] & ~(0x1f << 2)) | (18 << 2));
+    return orig_LivePresence_Serialize(unpack, presence, buffer, size);
 }
 HOOK(CL_GetConfigString, const char *, int32_t index) {
     const char *value = orig_CL_GetConfigString(index);
@@ -78,7 +104,6 @@ HOOK(LobbyMsgRW_ReadDebugSection, int32_t, int32_t *msg) {
     --debug_section_depth;
     return type;
 }
-HOOK(ExecLuaCMD, void, void) { }
 HOOK(UI_BrowserOpen, char, int64_t arg) { (void)arg; return 0; }
 HOOK(Mods_SubscribeUGC, bool, int64_t arg) {
     const char *enabled = getenv("BO3MACFIX_AUTOINSTALLMODS");
@@ -103,7 +128,6 @@ HOOK(LiveInvites_SendJoinInfo, int64_t, unsigned client, uint64_t id, int64_t ar
 // command from a private copy of msg_t with the game's own MSG readers.
 // Mac msg_t: +0 overflowed, +8 data, +0x10 splitData, +0x1c cursize,
 // +0x20 splitSize, +0x24 readcount, +0x28 bit.
-#define MAC_ADDR(rva) ((uintptr_t)(rva) + 0x100000000ull + (uintptr_t)_dyld_get_image_vmaddr_slide(0))
 static void (*MSG_BeginReading)(void *msg);
 static int32_t (*MSG_ReadLong)(void *msg);
 static char *(*MSG_ReadStringLine)(void *msg, char *buffer, int size);
@@ -193,25 +217,26 @@ void t7_install_hooks(void) {
     INSTALL(LobbyMsgRW_PackageInt);
     INSTALL(LobbyMsgRW_PackageUInt);
     INSTALL(LobbyMsgRW_PackageUChar);
-    INSTALL(SEH_ReplaceDirectiveInStringWithBinding);
-    INSTALL(UI_DoModelStringReplacement);
-    INSTALL(UI_Model_GetModelFromPath);
-    INSTALL(UI_Model_GetModelFromPath_0);
-    INSTALL(UI_Model_CreateModelFromPath);
-    INSTALL(UI_Model_AllocateNode);
-    INSTALL(qmemcpy);
-    INSTALL(CL_GetConfigString);
     INSTALL(LobbyMsgRW_PrintMessage);
     INSTALL(LobbyMsgRW_ReadDebugSection);
-    INSTALL(ExecLuaCMD);
+    INSTALL(LobbyTypes_GetMsgTypeName);
+    INSTALL(SEH_ParseNextDirective);
+    INSTALL(SEH_ParseNextDirectiveShort);
+    INSTALL(UI_DoModelStringReplacement);
+    INSTALL(UI_Model_ResolvePath);
+    INSTALL(UI_Model_AllocateNode);
+    INSTALL(CL_GetConfigString);
     INSTALL(UI_BrowserOpen);
     INSTALL(Mods_SubscribeUGC);
     INSTALL(LiveInvites_AcceptInvite);
     INSTALL(LiveInvites_JoinMessageAction);
     INSTALL(LiveInvites_SendJoinInfo);
+    INSTALL(LivePresence_Serialize);
     INSTALL(Scr_GscObjLink);
     INSTALL(CL_SwitchState_Idle_Update);
     INSTALL(LiveSteam_InitServer);
+    // qmemcpy has no Mac equivalent (memcpy is inlined); ExecLuaCMD's crash is
+    // already neutralized by upstream's Lua_CmdParseArgs patch.
     // BG_Cache_* index hooks stay disabled, as in upstream T7Patch.
     MSG_BeginReading = t7_resolve_function("MSG_BeginReading");
     MSG_ReadLong = t7_resolve_function("MSG_ReadLong");
@@ -223,7 +248,7 @@ void t7_install_hooks(void) {
     cbuf_add_text = t7_resolve_function("Cbuf_AddText");
     if (sv_argv && cbuf_add_text && t7_known_mac_build()) { INSTALL(CMD_MenuResponse_f); }
     else t7_log("[BO3MacFix] Menu filter needs the known Mac build.\n");
-    t7_log("[BO3MacFix] T7 optional hooks: %u installed, %u unresolved.\n", installed, missing);
+    t7_log("[BO3MacFix] T7 hooks: %u installed, %u unresolved.\n", installed, missing);
     t7_install_lua_symbols();
     t7_init_lobby_inspector();
 }
