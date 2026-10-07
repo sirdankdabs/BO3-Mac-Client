@@ -719,6 +719,18 @@ void boiii_frame(void) {
         }
         return;
     }
+    // Diagnostics: dump the first config strings once the gamestate is parsed.
+    static int dumped_configstrings;
+    if (target.routing && !dumped_configstrings && *client_state(0) >= 10) {
+        const char *(*get_configstring)(int) = t7_resolve_function("CL_GetConfigString");
+        if (get_configstring) {
+            dumped_configstrings = 1;
+            for (int i = 0; i < 24; ++i) {
+                const char *value = get_configstring(i);
+                if (value && *value) t7_log("[BO3MacFix] BOIII: cs %d = %.180s\n", i, value);
+            }
+        }
+    }
     static uint64_t next_stats;
     if (target.routing && now_ms() >= next_stats) {
         if (next_stats)
