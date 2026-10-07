@@ -621,10 +621,13 @@ static void server_id_outgoing(uint8_t *packet, size_t length) {
 // world the server streams unreliable snapshots, many per second.
 static void server_id_incoming(const uint8_t *bytes, size_t length) {
     if (length < 26 || bytes[1] != 0xe0) return;
-    int32_t seq;
-    memcpy(&seq, bytes + 21, 4);
     if ((bytes[18] & 0x40) && length >= 800) {
-        if (seq > sid.gamestate_seq) sid.gamestate_seq = seq;
+        // Gamestate. The first fragment ([25] = 0) carries the game's message
+        // sequence (the number the client acks) at offset 29; offset 21 is
+        // the netchan's own sequence, a different counter.
+        int32_t seq;
+        memcpy(&seq, bytes + 29, 4);
+        if (bytes[25] == 0 && seq > sid.gamestate_seq) sid.gamestate_seq = seq;
         return;
     }
     if (bytes[18] != 0x00 || !sid.searching || !sid.sent_value || sid.hit_value) return;
