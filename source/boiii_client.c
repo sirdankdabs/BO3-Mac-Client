@@ -538,6 +538,8 @@ static int hook_LiveUser_GetControllerFromXuid(uint64_t xuid) {
 // step to the next value. Once in game the low nibble is fixed by watching
 // whether the server acknowledges our reliable commands. The last working id
 // per server is kept in boiii_serverids.txt as the next starting guess.
+#define PROBE_HOLD_MS 300
+#define PROBE_MIN_RTT 10
 static struct {
     int fixed, active, value, high, low, low_tries, last_state;
     volatile int searching, sent_value, hit_value, alt_value, gamestate_seq, rejected;
@@ -625,11 +627,26 @@ static void server_id_outgoing(uint8_t *packet, size_t length) {
         if (!logged_wait) { logged_wait = 1; t7_log("[BO3MacFix] BOIII: waiting for the level to load before joining\n"); }
         return;
     }
+    // Each candidate is held for PROBE_HOLD_MS (longer than any round trip
+    // plus a server frame), so exactly one candidate can have started in the
+    // window that precedes the snapshot burst.
+    uint64_t now = now_ms();
+    static uint64_t held_since;
+    if (sid.sent_count && sid.sent[(sid.sent_count - 1) % 16].value == sid.value && now - held_since < PROBE_HOLD_MS) {
+        packet[29] = (uint8_t)sid.value;
+        return;
+    }
+    if (sid.sent_count && sid.sent[(sid.sent_count - 1) % 16].value == sid.value) {
+        // Held long enough: move to the next high nibble.
+        sid.high = sid.high % 15 + 1;
+        sid.value = (sid.high << 4) | sid.low;
+    }
+    held_since = now;
     packet[29] = (uint8_t)sid.value;
     sid.sent_value = sid.value;
     unsigned slot = sid.sent_count % 16;
     sid.sent[slot].value = sid.value;
-    sid.sent[slot].time = now_ms();
+    sid.sent[slot].time = now;
     ++sid.sent_count;
     static unsigned logged;
     if (logged < 40) {
@@ -637,9 +654,6 @@ static void server_id_outgoing(uint8_t *packet, size_t length) {
         t7_log("[BO3MacFix] BOIII: trying serverId 0x%02x (ack %d, gamestate %d, t %llu)\n", sid.value, ack,
                sid.gamestate_seq, (unsigned long long)(now_ms() % 100000));
     }
-    // Next packet tries the next high nibble.
-    sid.high = sid.high % 15 + 1;
-    sid.value = (sid.high << 4) | sid.low;
 }
 
 // Network thread (recvfrom): classify server netchan packets. The channel
@@ -662,31 +676,33 @@ static void server_id_incoming(const uint8_t *bytes, size_t length) {
         return;
     }
     if (bytes[18] != 0x00 || !sid.searching || !sid.sent_value || sid.hit_value) return;
-    static uint64_t window_start;
-    static int window_count;
+    // Burst = 8 unreliable packets within 400 ms; it starts at the oldest.
+    static uint64_t recent[8];
+    static unsigned recent_count;
     uint64_t now = now_ms();
-    if (!window_start || now - window_start > 1000) {
-        window_start = now;
-        window_count = 0;
-    }
-    if (++window_count >= 8) {
-        // The probe that got us in left at least a round trip (>= ~15 ms)
-        // before the first snapshot of the burst; later probes can't be it.
-        // Keep the one before it as the alternative.
+    recent[recent_count++ % 8] = now;
+    uint64_t window_start = recent[recent_count % 8];
+    int window_count = recent_count >= 8 && now - window_start <= 400 ? 8 : 0;
+    if (window_count >= 8) {
+        // The server reacts to the first packet carrying the right id, so the
+        // burst starts a round trip plus a server frame after that candidate
+        // started. With candidates held PROBE_HOLD_MS apart, only one start
+        // fits. The previous candidate is kept as the alternative.
         int hit = 0, alt = 0;
         unsigned count = sid.sent_count;
         for (unsigned i = 0; i < 16 && i < count; ++i) {
             unsigned slot = (count - 1 - i) % 16;
             if (!hit) {
-                if (sid.sent[slot].time + 15 <= window_start) hit = sid.sent[slot].value;
-            } else if (sid.sent[slot].value != hit) {
-                alt = sid.sent[slot].value;
-                break;
+                if (sid.sent[slot].time + PROBE_MIN_RTT <= window_start) {
+                    hit = sid.sent[slot].value;
+                    if (i + 1 < 16 && i + 1 < count) alt = sid.sent[(count - 2 - i) % 16].value;
+                    break;
+                }
             }
         }
         sid.alt_value = alt;
         sid.hit_value = hit ? hit : sid.sent_value;
-        window_start = 0;
+        recent_count = 0;
     }
 }
 
