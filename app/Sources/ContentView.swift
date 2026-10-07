@@ -248,6 +248,8 @@ struct StatusTag: View {
             tag("Incompatible", .gray)
         } else if server.needsWorkshop {
             tag("Mod", .purple)
+        } else if server.isCustomMap {
+            tag("Custom map", .teal)
         } else if server.isPrivate {
             tag("Locked", .orange)
         } else if server.isFull {
@@ -278,7 +280,7 @@ struct EngineStatusView: View {
     private var color: Color {
         switch status.state {
         case "in_game": return .green
-        case "connecting", "loading", "starting", "steam", "waiting_mode": return .yellow
+        case "connecting", "loading", "starting", "steam", "waiting_mode", "downloading": return .yellow
         case "failed": return .red
         case "offline": return .gray
         default: return .blue

@@ -34,15 +34,20 @@ struct Server: Identifiable, Hashable {
 
     var humans: Int { max(0, clients - bots) }
     var isFull: Bool { maxClients > 0 && clients >= maxClients }
-    /// Content the client must have: a real mod, or a custom map. A Workshop id
-    /// with a stock map (mod running only on the server) doesn't count.
-    var needsWorkshop: Bool { (!modID.isEmpty && modID != "usermaps") || !stockMap }
+    /// A real Workshop mod on the client (not supported yet). A Workshop id with
+    /// a stock map (mod running only on the server) doesn't count.
+    var needsMod: Bool { !modID.isEmpty && modID != "usermaps" }
+    /// A custom map: downloaded from the Workshop automatically when joining.
+    var isCustomMap: Bool { !stockMap }
+    var canDownloadMap: Bool { !workshopID.isEmpty && workshopID.allSatisfy(\.isNumber) }
+    var needsWorkshop: Bool { needsMod || (isCustomMap && !canDownloadMap) }
     var plainName: String { ColorCodes.strip(hostname) }
 
     /// Why the client can't join this server, or nil when it can.
     var blocker: String? {
         if !protocolOK { return "Incompatible server" }
-        if needsWorkshop { return stockMap ? "Needs a Workshop mod (not supported yet)" : "Custom map (not supported yet)" }
+        if needsMod { return "Needs a Workshop mod (not supported yet)" }
+        if isCustomMap && !canDownloadMap { return "Custom map not available on the Workshop" }
         if isPrivate { return "Password protected" }
         if isFull { return "Server is full" }
         return nil
