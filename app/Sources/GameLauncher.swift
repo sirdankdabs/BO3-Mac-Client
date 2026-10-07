@@ -38,7 +38,8 @@ final class GameLauncher: ObservableObject {
         readStatus()
     }
 
-    var isEngineRunning: Bool { status.state != "offline" }
+    /// The game is running with the engine loaded (or is being started by us).
+    var isEngineRunning: Bool { !["offline", "steam"].contains(status.state) }
 
     // MARK: - Game location
 
@@ -104,6 +105,8 @@ final class GameLauncher: ObservableObject {
         if !alive, gameProcess?.isRunning == true {
             next.state = "starting"
             next.message = "Starting Black Ops III…"
+        } else if !alive, status.state == "steam" {
+            next = status
         } else if alive {
             next.state = values["state"] ?? "idle"
             next.message = values["message"] ?? ""
@@ -142,7 +145,7 @@ final class GameLauncher: ObservableObject {
             return
         }
         guard Self.steamRunning else {
-            if let steam = URL(string: "steam://open/main") { NSWorkspace.shared.open(steam) }
+            Self.startSteamInBackground()
             status.state = "steam"
             status.message = "Starting Steam…"
             waitForSteam { [weak self] in self?.launch(name: name) }
@@ -179,6 +182,20 @@ final class GameLauncher: ObservableObject {
         for app in NSWorkspace.shared.runningApplications where app.executableURL?.lastPathComponent == "CoDBlkOps3_Exe" {
             app.activate()
         }
+    }
+
+    /// Starts Steam without bringing its window up (-silent keeps it in the
+    /// menu bar; the app isn't activated).
+    static func startSteamInBackground() {
+        guard let steam = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.valvesoftware.steam") else {
+            if let url = URL(string: "steam://") { NSWorkspace.shared.open(url) }
+            return
+        }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = false
+        configuration.hides = true
+        configuration.arguments = ["-silent"]
+        NSWorkspace.shared.openApplication(at: steam, configuration: configuration)
     }
 
     static var steamRunning: Bool {
