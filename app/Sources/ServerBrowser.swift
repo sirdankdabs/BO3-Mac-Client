@@ -25,19 +25,24 @@ struct Server: Identifiable, Hashable {
     var ping = 0
     var isPrivate = false
     var workshopID = ""
+    var modID = ""
     var modName = ""
+    /// Set by the browser when the game's install is known: the map ships with the game.
+    var stockMap = true
     var protocolOK = false
     var id: String { address }
 
     var humans: Int { max(0, clients - bots) }
     var isFull: Bool { maxClients > 0 && clients >= maxClients }
-    var needsWorkshop: Bool { !workshopID.isEmpty }
+    /// Content the client must have: a real mod, or a custom map. A Workshop id
+    /// with a stock map (mod running only on the server) doesn't count.
+    var needsWorkshop: Bool { (!modID.isEmpty && modID != "usermaps") || !stockMap }
     var plainName: String { ColorCodes.strip(hostname) }
 
     /// Why the client can't join this server, or nil when it can.
     var blocker: String? {
         if !protocolOK { return "Incompatible server" }
-        if needsWorkshop { return "Needs Workshop content (not supported yet)" }
+        if needsWorkshop { return stockMap ? "Needs a Workshop mod (not supported yet)" : "Custom map (not supported yet)" }
         if isPrivate { return "Password protected" }
         if isFull { return "Server is full" }
         return nil
@@ -54,8 +59,12 @@ final class ServerBrowser: ObservableObject {
 
     static let masters = ["master.ezz.lol:20810", "m.ezz.lol:20810"]
 
+    /// Contents/Assets/zone of the game, to tell stock maps from custom maps.
+    var zoneDirectory: URL?
+
     func refresh() {
         guard !isRefreshing else { return }
+        let zones = zoneDirectory
         isRefreshing = true
         lastError = nil
         DispatchQueue.global(qos: .userInitiated).async {
@@ -64,7 +73,13 @@ final class ServerBrowser: ObservableObject {
                 addresses = Self.queryMaster(master)
                 if !addresses.isEmpty { break }
             }
-            let results = addresses.isEmpty ? [] : Self.queryServers(addresses)
+            var results = addresses.isEmpty ? [] : Self.queryServers(addresses)
+            if let zones {
+                for i in results.indices where !results[i].map.isEmpty {
+                    results[i].stockMap = FileManager.default.fileExists(
+                        atPath: zones.appendingPathComponent("\(results[i].map).ff").path)
+                }
+            }
             DispatchQueue.main.async {
                 self.isRefreshing = false
                 self.lastRefresh = Date()
@@ -195,6 +210,8 @@ final class ServerBrowser: ObservableObject {
             server.isPrivate = info["isPrivate"] == "1"
             server.workshopID = info["workshop_id"] ?? info["usermapId"] ?? ""
             server.modName = ColorCodes.strip(info["modName"] ?? "")
+            server.modID = info["modId"] ?? ""
+            if server.modName == "usermaps" { server.modName = "" }
             server.protocolOK = info["protocol"] == "8" && info["gamename"] == "T7" && !server.map.isEmpty
             switch info["playmode"] {
             case "1": server.mode = .multiplayer

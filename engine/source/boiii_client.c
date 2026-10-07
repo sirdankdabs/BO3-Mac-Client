@@ -991,9 +991,24 @@ static bool try_server(const char *text) {
     if (strcmp(protocol, "8") || (strcmp(sub, "1") && strcmp(sub, "0")) || strcmp(game, "T7") || !*map || !*gametype) {
         t7_log("[BO3MacFix] BOIII: unsupported server (protocol/gamename)\n"); set_status("failed", "This server is not compatible"); return false;
     }
-    if (*workshop || *usermap) {
-        t7_log("[BO3MacFix] BOIII: server needs workshop content, not supported yet\n"); set_status("failed", "This server needs Workshop content (not supported yet)"); return false;
+    // Like the Windows client: a Workshop id alone doesn't block joining. Only
+    // a real mod (modId other than "" / "usermaps") or a map this install
+    // doesn't have (a custom map) needs content on the client; stock maps on
+    // servers whose mod only runs server-side join as usual.
+    char mod_id[64], zone_path[160];
+    info_value(info, "modId", mod_id, sizeof(mod_id));
+    snprintf(zone_path, sizeof(zone_path), "../Assets/zone/%s.ff", map);
+    bool stock_map = access(zone_path, R_OK) == 0;
+    bool real_mod = *mod_id && strcmp(mod_id, "usermaps");
+    if (real_mod || !stock_map) {
+        t7_log("[BO3MacFix] BOIII: server needs workshop content (mod '%s', map %s%s), not supported yet\n", mod_id, map,
+               stock_map ? "" : " not installed");
+        set_status("failed", "This server needs a Workshop mod or custom map (not supported yet)");
+        return false;
     }
+    if (*workshop || *usermap)
+        t7_log("[BO3MacFix] BOIII: server lists Workshop item %s but runs stock map %s; joining\n",
+               *workshop ? workshop : usermap, map);
     if (*max_clients && atoi(clients) >= atoi(max_clients)) {
         t7_log("[BO3MacFix] BOIII: %s is full (%s/%s)\n", text, clients, max_clients); set_status("failed", "The server is full"); return false;
     }

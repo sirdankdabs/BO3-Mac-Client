@@ -78,7 +78,13 @@ struct ContentView: View {
                 .help("Refresh the server list (⌘R)")
             }
         }
-        .onAppear { if browser.servers.isEmpty { browser.refresh() } }
+        .onAppear {
+            browser.zoneDirectory = launcher.gameAppURL?.appendingPathComponent("Contents/Assets/zone", isDirectory: true)
+            if browser.servers.isEmpty { browser.refresh() }
+        }
+        .onChange(of: launcher.gameAppURL) { _, url in
+            browser.zoneDirectory = url?.appendingPathComponent("Contents/Assets/zone", isDirectory: true)
+        }
         .alert("BO3 Mac Client", isPresented: Binding(get: { launcher.alert != nil }, set: { if !$0 { launcher.alert = nil } })) {
             Button("OK", role: .cancel) {}
         } message: {
