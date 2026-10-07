@@ -509,40 +509,114 @@ static int hook_LiveUser_GetControllerFromXuid(uint64_t xuid) {
     return orig_LiveUser_GetControllerFromXuid(xuid);
 }
 
-// The Mac client reads the server id from config string 3, which a BOIII
-// server (final Windows build) leaves empty; the client then reports serverId
-// 0 and the server keeps resending the gamestate. Look for sv_serverid in the
-// info config strings instead.
+// Server id. The Mac client reads it from config string 3, which a BOIII server
+// (final Windows build) leaves empty, so the client reports 0 and the server
+// keeps resending the gamestate (the intro loops).
+//
+// What the server checks (Mac SV_ExecuteClientMessage, 0x105bd66):
+//   id == sv.serverId          -> normal processing
+//   (id ^ sv.serverId) & 0xf0 == 0 -> enters the world if PRIMED, else the
+//                                 packet is ignored (map_restart in flight)
+//   otherwise                  -> gamestate resent
+// sv.serverId = (old + 0x10) & 0xff per map load, high nibble never 0; the low
+// nibble only moves on map_restart. So while PRIMED we try the 15 high nibbles
+// until the client goes active, then fix the low nibble by watching whether
+// the server acknowledges our reliable commands.
+#define SERVERID_HOLD_MS 600
+static struct {
+    int locked, fixed, active, value, high, low, previous_high, low_tries;
+    uint64_t since, pending_since;
+} sid = {0, 0, 0, 0x10, 1, 0, 1, 0, 0, 0};
+
+static void set_server_id(int value) {
+    uintptr_t cl = *(uintptr_t *)MAC_ADDR(0x11534598);
+    if (cl && *(int32_t *)MAC_ADDR(0x11534590) > 0) *(int32_t *)(cl + 0xb684) = value;
+    *(int32_t *)MAC_ADDR(0x115345b0 + 0x2bf0c8) = value;
+}
+
+static void server_id_reset(void) {
+    const char *fixed = getenv("BO3MACFIX_BOIII_SERVERID");
+    int value = fixed && *fixed ? (int)strtol(fixed, NULL, 0) & 0xff : 0;
+    sid.locked = sid.fixed = value != 0;
+    sid.active = 0;
+    sid.value = value ? value : 0x10;
+    sid.high = (sid.value >> 4) ? sid.value >> 4 : 1;
+    sid.low = sid.value & 0xf;
+    sid.previous_high = sid.high;
+    sid.low_tries = 0;
+    sid.since = sid.pending_since = 0;
+}
+
+// Main thread, every frame while routing.
+static void server_id_frame(void) {
+    int32_t state = *client_state(0);
+    if (state < 10) return;
+    uint64_t now = now_ms();
+    if (state == 10) {
+        if (sid.active) {
+            // Back from the game to a new gamestate: the server rejected the
+            // high nibble (or changed map). Search again.
+            sid.active = 0;
+            if (!sid.fixed) {
+                t7_log("[BO3MacFix] BOIII: serverId 0x%02x rejected, searching again\n", sid.value);
+                sid.locked = 0;
+                sid.high = sid.high % 15 + 1;
+                sid.low_tries = 0;
+                sid.since = 0;
+            }
+        }
+        if (!sid.locked) {
+            if (!sid.since) sid.since = now;
+            else if (now - sid.since >= SERVERID_HOLD_MS) {
+                sid.previous_high = sid.high;
+                sid.high = sid.high % 15 + 1;
+                sid.since = now;
+            }
+            sid.value = (sid.high << 4) | sid.low;
+        }
+        set_server_id(sid.value);
+        return;
+    }
+    // Active (in game).
+    sid.active = 1;
+    if (!sid.locked) {
+        // The packet that got us in left at most a round trip ago.
+        int high = now - sid.since < SERVERID_HOLD_MS / 2 ? sid.previous_high : sid.high;
+        sid.high = high;
+        sid.value = (high << 4) | sid.low;
+        sid.locked = 1;
+        sid.since = now;
+        sid.pending_since = 0;
+        t7_log("[BO3MacFix] BOIII: in game, serverId 0x%02x\n", sid.value);
+    }
+    set_server_id(sid.value);
+    if (sid.fixed) return;
+    // Low nibble: with only the high nibble right the server ignores our
+    // packets, so our reliable commands (clc+0x130 sent, +0x134 acked) stay
+    // unacknowledged.
+    uintptr_t clc = *(uintptr_t *)MAC_ADDR(0x115345a0);
+    if (!clc) return;
+    int32_t sent = *(int32_t *)(clc + 0x130), acked = *(int32_t *)(clc + 0x134);
+    if (sent <= acked) { sid.pending_since = 0; return; }
+    if (!sid.pending_since) { sid.pending_since = now; return; }
+    if (now - sid.pending_since > 2500 && sid.low_tries < 16) {
+        ++sid.low_tries;
+        sid.low = (sid.low + 1) & 0xf;
+        sid.value = (sid.high << 4) | sid.low;
+        sid.pending_since = now;
+        t7_log("[BO3MacFix] BOIII: commands not acknowledged (%d/%d), trying serverId 0x%02x\n", acked, sent,
+               sid.value);
+    }
+}
+
 static void (*orig_CL_ParseServerId)(int);
 static void hook_CL_ParseServerId(int client) {
     orig_CL_ParseServerId(client);
     if (!target.routing || client != 0) return;
     const char *(*get_configstring)(int) = t7_resolve_function("CL_GetConfigString");
-    if (!get_configstring) return;
-    const char *direct = get_configstring(3);
+    const char *direct = get_configstring ? get_configstring(3) : NULL;
     if (direct && *direct) return;
-    for (int index = 0; index < 3; ++index) {
-        const char *info = get_configstring(index);
-        const char *found = info ? strstr(info, "\\sv_serverid\\") : NULL;
-        if (!found) continue;
-        int server_id = atoi(found + 13);
-        uintptr_t cl = *(uintptr_t *)MAC_ADDR(0x11534598);
-        if (cl && *(int32_t *)MAC_ADDR(0x11534590) > 0) *(int32_t *)(cl + 0xb684) = server_id;
-        *(int32_t *)MAC_ADDR(0x115345b0 + 0x2bf0c8) = server_id;
-        t7_log("[BO3MacFix] BOIII: serverId %d (from config string %d)\n", server_id, index);
-        return;
-    }
-    static int logged;
-    if (!logged) {
-        logged = 1;
-        for (int index = 0; index < 2; ++index) {
-            const char *info = get_configstring(index);
-            size_t length = info ? strlen(info) : 0;
-            for (size_t offset = 0; offset < length; offset += 200)
-                t7_log("[BO3MacFix] BOIII: cs%d[%zu] %.200s\n", index, offset, info + offset);
-        }
-        t7_log("[BO3MacFix] BOIII: no sv_serverid found\n");
-    }
+    set_server_id(sid.value);
 }
 
 // Sys_SendPacket(netsrc, length, data, netadr_t to): plain sendto for the server.
@@ -725,6 +799,7 @@ void boiii_frame(void) {
         target.routing = 1;
         signature_retries = 0;
         server_xuid = 0;
+        server_id_reset();
         stat_sent = stat_sent_bytes = stat_recv = stat_recv_bytes = stat_raw = stat_injected = stat_dropped = 0;
         logged_sent = 0;
         pthread_mutex_lock(&queue_lock);
@@ -761,17 +836,22 @@ void boiii_frame(void) {
         const char *(*get_configstring)(int) = t7_resolve_function("CL_GetConfigString");
         if (get_configstring) {
             dumped_configstrings = 1;
-            for (int i = 0; i < 24; ++i) {
+            int shown = 0;
+            for (int i = 3; i < 0xe2e && shown < 60; ++i) {
                 const char *value = get_configstring(i);
-                if (value && *value) t7_log("[BO3MacFix] BOIII: cs %d = %.180s\n", i, value);
+                if (value && *value && strlen(value) <= 24) {
+                    ++shown;
+                    t7_log("[BO3MacFix] BOIII: cs %d = %s\n", i, value);
+                }
             }
         }
     }
+    if (target.routing) server_id_frame();
     static uint64_t next_stats;
     if (target.routing && now_ms() >= next_stats) {
         if (next_stats)
-            t7_log("[BO3MacFix] BOIII: state %d sent %u/%uB recv %u/%uB raw %u injected %u dropped %u\n",
-                   *client_state(0), stat_sent, stat_sent_bytes, stat_recv, stat_recv_bytes, stat_raw, stat_injected,
+            t7_log("[BO3MacFix] BOIII: serverId 0x%02x%s state %d sent %u/%uB recv %u/%uB raw %u injected %u dropped %u\n",
+                   sid.value, sid.locked ? " (locked)" : "", *client_state(0), stat_sent, stat_sent_bytes, stat_recv, stat_recv_bytes, stat_raw, stat_injected,
                    stat_dropped);
         next_stats = now_ms() + 5000;
     }
