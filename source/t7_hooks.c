@@ -85,7 +85,8 @@ HOOK(LivePresence_Serialize, int32_t, bool unpack, void *presence, uint8_t *buff
 }
 HOOK(CL_GetConfigString, const char *, int32_t index) {
     const char *value = orig_CL_GetConfigString(index);
-    if (!bo3_is_campaign() && (index == 3514 || index == 3627) && value &&
+    // BOIII servers drive map loads with mspreload/msload; leave it intact there.
+    if (!bo3_is_campaign() && !boiii_session_active() && (index == 3514 || index == 3627) && value &&
         !strncasecmp(value, "mspreload", 9)) return "";
     return value;
 }
@@ -180,7 +181,9 @@ HOOK(CMD_MenuResponse_f, void, char *entity) {
     orig_CMD_MenuResponse_f(entity);
 }
 HOOK(CL_SwitchState_Idle_Update, int32_t, void *state) {
-    return bo3_is_campaign() ? orig_CL_SwitchState_Idle_Update(state) : 0;
+    // The preload state machine also reports "preloadfinished" to the server,
+    // which BOIII servers wait for before activating the client.
+    return bo3_is_campaign() || boiii_session_active() ? orig_CL_SwitchState_Idle_Update(state) : 0;
 }
 HOOK(LiveSteam_InitServer, void, void) { }
 // With the Steam game server never initialized, its per-frame state machine

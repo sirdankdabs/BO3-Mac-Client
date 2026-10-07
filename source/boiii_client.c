@@ -323,6 +323,8 @@ static void handle_raw_packet(const uint8_t *data, size_t length) {
     }
 }
 
+bool boiii_session_active(void) { return target.routing != 0; }
+
 // Called from the T7 connectionless filter before it decides. Returns true when
 // the packet was consumed here.
 bool boiii_connectionless(const char *command, const void *msg) {

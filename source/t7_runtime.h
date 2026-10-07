@@ -26,6 +26,7 @@ void boiii_client_register(void);
 void boiii_client_install(void);
 void boiii_frame(void);
 bool boiii_connectionless(const char *command, const void *msg);
+bool boiii_session_active(void);
 #ifdef __cplusplus
 }
 #endif
