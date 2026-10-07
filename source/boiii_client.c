@@ -598,16 +598,34 @@ static void server_id_reset(void) {
 }
 
 // Main thread (Sys_SendPacket): rewrite an outgoing data packet while searching.
+static bool level_loaded(void) {
+    // CL_SetCGameTime (0xe2fbe8) sets clc+0x2454d once the level's fastfiles
+    // are fully loaded; until then the client stays PRIMED (can be > 1 min).
+    uintptr_t clc = *(uintptr_t *)MAC_ADDR(0x115345a0);
+    return clc && *(uint8_t *)(clc + 0x2454d);
+}
+
 static void server_id_outgoing(uint8_t *packet, size_t length) {
     if (!sid.searching || length < 38 || packet[1] != 0xe0 || packet[18] != 0x01 || packet[26] != 0x01) return;
     if (*client_state(0) < 10) return;
-    packet[29] = (uint8_t)sid.value;
     int32_t ack;
     memcpy(&ack, packet + 30, 4);
     if (sid.gamestate_seq >= 0 && ack > sid.gamestate_seq) {
         int32_t clamped = sid.gamestate_seq;
         memcpy(packet + 30, &clamped, 4);
     }
+    // Stay out of the world until the level has loaded: once in, the server
+    // streams game commands the cgame can't consume yet, and more than 128 of
+    // them overflow the client (EXE_ERR_RELIABLE_CYCLED_OUT). Id 0 never
+    // matches (the server's high nibble is never 0) and, with the ack
+    // clamped, doesn't trigger a gamestate resend either.
+    if (!level_loaded()) {
+        packet[29] = 0;
+        static int logged_wait;
+        if (!logged_wait) { logged_wait = 1; t7_log("[BO3MacFix] BOIII: waiting for the level to load before joining\n"); }
+        return;
+    }
+    packet[29] = (uint8_t)sid.value;
     sid.sent_value = sid.value;
     unsigned slot = sid.sent_count % 16;
     sid.sent[slot].value = sid.value;
@@ -725,6 +743,23 @@ static void server_id_frame(void) {
                sid.value);
         saved_server_id(true, sid.value);
     }
+}
+
+// Safety net for the same overflow: skip commands that were cycled out
+// instead of dropping the connection (the game does this itself for demos).
+static int (*orig_CL_CGameNeedsServerCommand)(int, int);
+static int hook_CL_CGameNeedsServerCommand(int client, int number) {
+    if (target.routing) {
+        uintptr_t clc = *(uintptr_t *)MAC_ADDR(0x115345a0);
+        if (clc && client == 0 && number <= *(int32_t *)(clc + 0x4544) - 0x80) {
+            static unsigned skipped;
+            if (skipped++ % 64 == 0)
+                t7_log("[BO3MacFix] BOIII: skipping cycled-out server command %d (latest %d, %u skipped)\n", number,
+                       *(int32_t *)(clc + 0x4544), skipped);
+            return 0;
+        }
+    }
+    return orig_CL_CGameNeedsServerCommand(client, number);
 }
 
 static void (*orig_CL_ParseServerId)(int);
@@ -1056,6 +1091,9 @@ void boiii_client_install(void) {
     int e = DobbyHook(frontend, (void *)hook_Com_ReturnToFrontend, (void **)&orig_Com_ReturnToFrontend);
     void *server_id = t7_resolve_function("CL_ParseServerId");
     if (server_id) DobbyHook(server_id, (void *)hook_CL_ParseServerId, (void **)&orig_CL_ParseServerId);
+    void *needs_command = t7_resolve_function("CL_CGameNeedsServerCommand");
+    if (needs_command)
+        DobbyHook(needs_command, (void *)hook_CL_CGameNeedsServerCommand, (void **)&orig_CL_CGameNeedsServerCommand);
     void *lookup = t7_resolve_function("LiveUser_GetControllerFromXuid");
     int f = lookup ? DobbyHook(lookup, (void *)hook_LiveUser_GetControllerFromXuid,
                                (void **)&orig_LiveUser_GetControllerFromXuid) : -1;
