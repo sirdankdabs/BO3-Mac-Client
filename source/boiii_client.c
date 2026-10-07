@@ -400,6 +400,13 @@ static ssize_t recvfrom_hook(int fd, void *buffer, size_t capacity, int flags, s
         } else if ((size_t)received <= sizeof(packet_queue[0].data)) {
             if (received >= 6 && !memcmp(bytes + 1, "\xff\xff\xff\xff", 4)) log_oob_once("server", bytes + 5, (size_t)received - 5);
             else log_type_once(bytes, (size_t)received);
+            static unsigned dumped_server;
+            if (*client_state(0) >= 10 && dumped_server < 16) {
+                ++dumped_server;
+                char hex[400];
+                hex_prefix(bytes, received < 190 ? (size_t)received : 190, hex, sizeof(hex));
+                t7_log("[BO3MacFix] BOIII: S> %zd: %s\n", received, hex);
+            }
             // Netchan packets: [socket byte][type][u64 dest xuid][u64 from xuid]...
             if (!server_xuid && received >= 18) {
                 uint64_t dest, from_xuid;
@@ -518,6 +525,13 @@ static bool hook_Sys_SendPacket(int socket_id, int length, const uint8_t *data, 
         ++stat_sent;
         stat_sent_bytes += (unsigned)length + 1;
         if (length >= 5 && !memcmp(data, "\xff\xff\xff\xff", 4)) log_oob_once("client", data + 4, (size_t)length - 4);
+        static unsigned dumped_client;
+        if (*client_state(0) >= 10 && dumped_client < 10) {
+            ++dumped_client;
+            char hex[400];
+            hex_prefix(packet, length + 1 < 190 ? (size_t)length + 1 : 190, hex, sizeof(hex));
+            t7_log("[BO3MacFix] BOIII: C> %d: %s\n", length + 1, hex);
+        }
         if (logged_sent < 6 && length >= 4 && memcmp(data, "\xff\xff\xff\xff", 4)) {
             ++logged_sent;
             char hex[80];
