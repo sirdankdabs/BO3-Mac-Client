@@ -126,6 +126,7 @@ static uint64_t last_challenge_request;
 // key-derived XUID, so controller 0 uses it while a BOIII session is active and
 // gets its Steam XUID back afterwards.
 static uint64_t saved_xuid;
+static uint64_t steam_xuid;
 static int xuid_swapped;
 static void use_boiii_xuid(bool enable) {
     uint64_t *slot = *(uint64_t **)MAC_ADDR(0x20915f0);
@@ -491,6 +492,14 @@ static void hook_Com_ReturnToFrontend(void) {
     orig_Com_ReturnToFrontend();
 }
 
+// The game keeps the Steam XUID (its stats are bound to it); packets the BOIII
+// server addresses to our key XUID belong to controller 0.
+static int (*orig_LiveUser_GetControllerFromXuid)(uint64_t);
+static int hook_LiveUser_GetControllerFromXuid(uint64_t xuid) {
+    if (target.routing && xuid == key_xuid) return 0;
+    return orig_LiveUser_GetControllerFromXuid(xuid);
+}
+
 // Sys_SendPacket(netsrc, length, data, netadr_t to): plain sendto for the server.
 static bool (*orig_Sys_SendPacket)(int, int, const uint8_t *, uint64_t, uint64_t);
 static bool hook_Sys_SendPacket(int socket_id, int length, const uint8_t *data, uint64_t lo, uint64_t hi) {
@@ -498,6 +507,12 @@ static bool hook_Sys_SendPacket(int socket_id, int length, const uint8_t *data, 
         uint8_t packet[1601];
         packet[0] = (uint8_t)((socket_id & 0xf) | (((int)(hi >> 32) & 0xf) << 4));
         memcpy(packet + 1, data, (size_t)length);
+        // Netchan packets: [type][u64 dest][u64 from]... -> present our key XUID.
+        if (length >= 17 && memcmp(data, "\xff\xff\xff\xff", 4)) {
+            uint64_t from_xuid;
+            memcpy(&from_xuid, packet + 10, 8);
+            if (steam_xuid && from_xuid == steam_xuid) memcpy(packet + 10, &key_xuid, 8);
+        }
         ++stat_sent;
         stat_sent_bytes += (unsigned)length + 1;
         if (length >= 5 && !memcmp(data, "\xff\xff\xff\xff", 4)) log_oob_once("client", data + 4, (size_t)length - 4);
@@ -677,7 +692,8 @@ void boiii_frame(void) {
             t7_log("[BO3MacFix] BOIII: stopping the menu's local server\n");
             Com_KillLocalServerForLaunch();
         }
-        use_boiii_xuid(true);
+        uint64_t *slot = *(uint64_t **)MAC_ADDR(0x20915f0);
+        steam_xuid = slot ? *slot : 0;
         t7_log("[BO3MacFix] BOIII: launching client for %s %s (state %d)\n", target.map, target.gametype,
                *client_state(0));
         if (!CL_LaunchClient(target.map, target.gametype, &error)) {
@@ -760,7 +776,10 @@ void boiii_client_install(void) {
     int c = DobbyHook(get_packet, (void *)hook_Sys_GetPacket, (void **)&orig_Sys_GetPacket);
     int d = DobbyHook(send_packet, (void *)hook_Sys_SendPacket, (void **)&orig_Sys_SendPacket);
     int e = DobbyHook(frontend, (void *)hook_Com_ReturnToFrontend, (void **)&orig_Com_ReturnToFrontend);
-    t7_log("[BO3MacFix] BOIII: client hooks %s\n", !a && !b && !c && !d && !e ? "active" : "failed");
+    void *lookup = t7_resolve_function("LiveUser_GetControllerFromXuid");
+    int f = lookup ? DobbyHook(lookup, (void *)hook_LiveUser_GetControllerFromXuid,
+                               (void **)&orig_LiveUser_GetControllerFromXuid) : -1;
+    t7_log("[BO3MacFix] BOIII: client hooks %s\n", !a && !b && !c && !d && !e && !f ? "active" : "failed");
 }
 
 void boiii_client_register(void) {
