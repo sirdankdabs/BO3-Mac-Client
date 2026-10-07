@@ -340,6 +340,7 @@ bool boiii_connectionless(const char *command, const void *msg) {
 // addresses it has no connection for, so traffic with the BOIII server is
 // carried on the game's UDP socket directly and fed back through Sys_GetPacket.
 static volatile int game_socket = -1;
+static volatile uint64_t server_xuid;
 
 #define QUEUE_SIZE 256
 static struct { uint8_t data[1600]; uint16_t length; } packet_queue[QUEUE_SIZE];
@@ -360,6 +361,16 @@ static ssize_t recvfrom_hook(int fd, void *buffer, size_t capacity, int flags, s
         if (received >= 4 && !memcmp(bytes, "\xff\xff\xff\xff", 4)) {
             handle_raw_packet(bytes, (size_t)received);
         } else if ((size_t)received <= sizeof(packet_queue[0].data)) {
+            // Netchan packets: [socket byte][type][u64 dest xuid][u64 from xuid]...
+            if (!server_xuid && received >= 18) {
+                uint64_t dest, from_xuid;
+                memcpy(&dest, bytes + 2, 8);
+                memcpy(&from_xuid, bytes + 10, 8);
+                if (dest == key_xuid && from_xuid) {
+                    server_xuid = from_xuid;
+                    t7_log("[BO3MacFix] BOIII: server xuid %llx\n", (unsigned long long)server_xuid);
+                }
+            }
             pthread_mutex_lock(&queue_lock);
             if (queue_tail - queue_head < QUEUE_SIZE) {
                 memcpy(packet_queue[queue_tail % QUEUE_SIZE].data, bytes, (size_t)received);
@@ -598,6 +609,7 @@ void boiii_frame(void) {
         target.active = 1;
         target.routing = 1;
         signature_retries = 0;
+        server_xuid = 0;
         pthread_mutex_lock(&queue_lock);
         queue_head = queue_tail = 0;
         pthread_mutex_unlock(&queue_lock);
@@ -624,6 +636,28 @@ void boiii_frame(void) {
             target.routing = 0;
         }
         return;
+    }
+    // CL_WritePacket sends to the netchan peer at clc+0x24b68 (xuid) /
+    // clc+0x2455c (address). The menu's lobby made us our own "host", so point
+    // both at the BOIII server once we are connected.
+    if (target.routing && server_xuid && *client_state(0) > CONNSTATE_CONNECTING) {
+        uint8_t *clc = client_server_address(0);
+        if (clc) {
+            clc -= 0x10;
+            uint64_t *peer_xuid = (uint64_t *)(clc + 0x24b68);
+            uint8_t *peer_address = clc + 0x2455c;
+            int32_t ip_type = 4;
+            if (*peer_xuid != server_xuid || memcmp(peer_address, target.ip, 4) || memcmp(peer_address + 8, &ip_type, 4)) {
+                int32_t old_type;
+                memcpy(&old_type, peer_address + 8, 4);
+                t7_log("[BO3MacFix] BOIII: netchan peer %llx (type %d) -> %llx %s\n", (unsigned long long)*peer_xuid,
+                       old_type, (unsigned long long)server_xuid, target.printable);
+                *peer_xuid = server_xuid;
+                memcpy(peer_address, target.ip, 4);
+                memcpy(peer_address + 4, &target.port, 2);
+                memcpy(peer_address + 8, &ip_type, 4);
+            }
+        }
     }
     if (target.active) {
         int32_t state = *client_state(0);
