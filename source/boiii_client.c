@@ -420,21 +420,24 @@ static bool hook_Sys_GetPacket(uint8_t *from, uint8_t *msg) {
 static void (*orig_Com_ReturnToFrontend)(void);
 static volatile int frontend_deferred;
 static void use_boiii_xuid(bool enable);
+static int32_t *client_state(int client);
 static void hook_Com_ReturnToFrontend(void) {
-    if (target.active) {
-        // Still connecting: this is the lobby reacting to the killed menu server.
+    if (target.routing && *client_state(0) >= CONNSTATE_CHALLENGING) {
+        // Still connecting/connected to the BOIII server: this is the menu's
+        // lobby reacting to its killed local server. Hold it.
         if (!frontend_deferred) t7_log("[BO3MacFix] BOIII: deferring return to frontend\n");
         frontend_deferred = 1;
         return;
     }
     if (target.routing) {
-        // Connected and the game is going back to the menu (disconnect/error):
-        // end the BOIII session first, then let it proceed normally.
+        // The client already dropped (error or disconnect): end the BOIII
+        // session and let the game return to the menu right away.
         t7_log("[BO3MacFix] BOIII: session ended, returning to frontend\n");
         target.routing = 0;
+        target.active = 0;
         use_boiii_xuid(false);
-        frontend_deferred = 0;
     }
+    frontend_deferred = 0;
     orig_Com_ReturnToFrontend();
 }
 
