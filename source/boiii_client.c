@@ -540,8 +540,11 @@ static int hook_LiveUser_GetControllerFromXuid(uint64_t xuid) {
 // per server is kept in boiii_serverids.txt as the next starting guess.
 static struct {
     int fixed, active, value, high, low, low_tries, last_state;
-    volatile int searching, sent_value, hit_value, gamestate_seq;
+    volatile int searching, sent_value, hit_value, alt_value, gamestate_seq, rejected;
     uint64_t pending_since;
+    // Recent probes (value, send time) to attribute the snapshot burst.
+    struct { int value; uint64_t time; } sent[16];
+    volatile unsigned sent_count;
 } sid;
 
 static void set_server_id(int value) {
@@ -587,7 +590,8 @@ static void server_id_reset(void) {
     sid.low_tries = 0;
     sid.last_state = 0;
     sid.searching = !sid.fixed;
-    sid.sent_value = sid.hit_value = 0;
+    sid.sent_value = sid.hit_value = sid.alt_value = sid.rejected = 0;
+    sid.sent_count = 0;
     sid.gamestate_seq = -1;
     sid.pending_since = 0;
     t7_log("[BO3MacFix] BOIII: serverId starts at 0x%02x%s\n", value, sid.fixed ? " (fixed in bo3macfix.conf)" : "");
@@ -605,10 +609,15 @@ static void server_id_outgoing(uint8_t *packet, size_t length) {
         memcpy(packet + 30, &clamped, 4);
     }
     sid.sent_value = sid.value;
+    unsigned slot = sid.sent_count % 16;
+    sid.sent[slot].value = sid.value;
+    sid.sent[slot].time = now_ms();
+    ++sid.sent_count;
     static unsigned logged;
     if (logged < 40) {
         ++logged;
-        t7_log("[BO3MacFix] BOIII: trying serverId 0x%02x (ack %d, gamestate %d)\n", sid.value, ack, sid.gamestate_seq);
+        t7_log("[BO3MacFix] BOIII: trying serverId 0x%02x (ack %d, gamestate %d, t %llu)\n", sid.value, ack,
+               sid.gamestate_seq, (unsigned long long)(now_ms() % 100000));
     }
     // Next packet tries the next high nibble.
     sid.high = sid.high % 15 + 1;
@@ -627,20 +636,38 @@ static void server_id_incoming(const uint8_t *bytes, size_t length) {
         // the netchan's own sequence, a different counter.
         int32_t seq;
         memcpy(&seq, bytes + 29, 4);
-        if (bytes[25] == 0 && seq > sid.gamestate_seq) sid.gamestate_seq = seq;
+        if (bytes[25] == 0 && seq > sid.gamestate_seq) {
+            // A new gamestate after we settled on an id: the server rejected it.
+            if (sid.gamestate_seq >= 0 && !sid.searching && !sid.fixed) sid.rejected = 1;
+            sid.gamestate_seq = seq;
+        }
         return;
     }
     if (bytes[18] != 0x00 || !sid.searching || !sid.sent_value || sid.hit_value) return;
     static uint64_t window_start;
-    static int window_count, window_value;
+    static int window_count;
     uint64_t now = now_ms();
     if (!window_start || now - window_start > 1000) {
         window_start = now;
         window_count = 0;
-        window_value = sid.sent_value;
     }
     if (++window_count >= 8) {
-        sid.hit_value = window_value;
+        // The probe that got us in left at least a round trip (>= ~15 ms)
+        // before the first snapshot of the burst; later probes can't be it.
+        // Keep the one before it as the alternative.
+        int hit = 0, alt = 0;
+        unsigned count = sid.sent_count;
+        for (unsigned i = 0; i < 16 && i < count; ++i) {
+            unsigned slot = (count - 1 - i) % 16;
+            if (!hit) {
+                if (sid.sent[slot].time + 15 <= window_start) hit = sid.sent[slot].value;
+            } else if (sid.sent[slot].value != hit) {
+                alt = sid.sent[slot].value;
+                break;
+            }
+        }
+        sid.alt_value = alt;
+        sid.hit_value = hit ? hit : sid.sent_value;
         window_start = 0;
     }
 }
@@ -654,19 +681,22 @@ static void server_id_frame(void) {
         sid.searching = 0;
         sid.value = sid.hit_value;
         sid.high = sid.value >> 4;
-        t7_log("[BO3MacFix] BOIII: server accepted serverId 0x%02x, entering the game\n", sid.value);
+        t7_log("[BO3MacFix] BOIII: server accepted serverId 0x%02x (alternative 0x%02x), entering the game\n",
+               sid.value, sid.alt_value);
         saved_server_id(true, sid.value);
     }
-    if (last >= 10 && state < 10 && state > 4) {
-        // A new gamestate got through: wrong id (or the server changed map).
+    (void)last;
+    if (sid.rejected) {
+        // The server sent a new gamestate: wrong id (or it changed map).
+        // Try the alternative probe first, then keep searching.
+        sid.rejected = 0;
         sid.active = 0;
-        if (!sid.fixed) {
-            sid.high = sid.high % 15 + 1;
-            sid.value = (sid.high << 4) | sid.low;
-            sid.searching = 1;
-            sid.hit_value = sid.sent_value = 0;
-            t7_log("[BO3MacFix] BOIII: new gamestate, searching the serverId again from 0x%02x\n", sid.value);
-        }
+        int next = sid.alt_value ? sid.alt_value : (((sid.high % 15 + 1) << 4) | sid.low);
+        sid.high = next >> 4;
+        sid.value = (sid.high << 4) | sid.low;
+        sid.hit_value = sid.sent_value = sid.alt_value = 0;
+        sid.searching = 1;
+        t7_log("[BO3MacFix] BOIII: new gamestate, searching the serverId again from 0x%02x\n", sid.value);
     }
     if (state < 9) return;
     if (!sid.searching) set_server_id(sid.value);
