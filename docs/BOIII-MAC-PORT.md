@@ -41,3 +41,8 @@ Fuente analizada: `Ezz-lol/boiii-free` (solo lectura). La parte de saltarse la p
 
 ## Fase 2 (beta12): cliente experimental
 `BO3MACFIX_BOIII=1` + `boiii_connect ip:puerto` (o `BO3MACFIX_BOIII_CONNECT`). Implementado en `source/boiii_client.c`: socket en 0.0.0.0 (interposición de `bind`), `CL_LaunchClient(map, gametype)`, redirección en `CL_CheckForResend`, challenge en el filtro connectionless, `connect` firmado (libtomcrypt develop, P-521, X9.62/SHA-512) y fragmentado en `NET_OutOfBandData`. Clave persistente en `BO3MacFix/boiii_key.dat`. Autenticación verificada contra un servidor real desde fuera del juego; el flujo dentro del juego está pendiente de probar.
+
+## Fase 3 (beta38): primera partida jugada en un servidor OX
+- serverId: el servidor de Windows deja vacío el config string 3. Mac SV_ExecuteClientMessage (0x105bd66) solo compara el nibble alto (`(id ^ sv.serverId) & 0xf0`), y `sv.serverId += 0x10` por mapa. El cliente prueba los 15 nibbles altos; cada candidato se mantiene 300 ms. Mientras busca, el messageAck (offset 30 del paquete) se fija al número de mensaje del gamestate (offset 29 del fragmento 0, no el contador del netchan en 21), así el servidor no reenvía el gamestate. La entrada se detecta por la ráfaga de snapshots (8 paquetes no fiables en 400 ms). El valor se guarda en `boiii_serverids.txt`.
+- Carga: el cliente de Mac tarda ~60–75 s en PRIMED (fastfiles y vídeo de carga). Más de 128 comandos fiables se acumulan → `CL_CGameNeedsServerCommand` (0xe2de31) se engancha para saltar los comandos ya ciclados en vez de EXE_ERR_RELIABLE_CYCLED_OUT.
+- Pendiente: ESC no abre el menú de pausa en la partida; el input a veces se congela al cambiar de ventana.
