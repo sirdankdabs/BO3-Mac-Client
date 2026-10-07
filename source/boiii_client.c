@@ -509,6 +509,42 @@ static int hook_LiveUser_GetControllerFromXuid(uint64_t xuid) {
     return orig_LiveUser_GetControllerFromXuid(xuid);
 }
 
+// The Mac client reads the server id from config string 3, which a BOIII
+// server (final Windows build) leaves empty; the client then reports serverId
+// 0 and the server keeps resending the gamestate. Look for sv_serverid in the
+// info config strings instead.
+static void (*orig_CL_ParseServerId)(int);
+static void hook_CL_ParseServerId(int client) {
+    orig_CL_ParseServerId(client);
+    if (!target.routing || client != 0) return;
+    const char *(*get_configstring)(int) = t7_resolve_function("CL_GetConfigString");
+    if (!get_configstring) return;
+    const char *direct = get_configstring(3);
+    if (direct && *direct) return;
+    for (int index = 0; index < 3; ++index) {
+        const char *info = get_configstring(index);
+        const char *found = info ? strstr(info, "\\sv_serverid\\") : NULL;
+        if (!found) continue;
+        int server_id = atoi(found + 13);
+        uintptr_t cl = *(uintptr_t *)MAC_ADDR(0x11534598);
+        if (cl && *(int32_t *)MAC_ADDR(0x11534590) > 0) *(int32_t *)(cl + 0xb684) = server_id;
+        *(int32_t *)MAC_ADDR(0x115345b0 + 0x2bf0c8) = server_id;
+        t7_log("[BO3MacFix] BOIII: serverId %d (from config string %d)\n", server_id, index);
+        return;
+    }
+    static int logged;
+    if (!logged) {
+        logged = 1;
+        for (int index = 0; index < 2; ++index) {
+            const char *info = get_configstring(index);
+            size_t length = info ? strlen(info) : 0;
+            for (size_t offset = 0; offset < length; offset += 200)
+                t7_log("[BO3MacFix] BOIII: cs%d[%zu] %.200s\n", index, offset, info + offset);
+        }
+        t7_log("[BO3MacFix] BOIII: no sv_serverid found\n");
+    }
+}
+
 // Sys_SendPacket(netsrc, length, data, netadr_t to): plain sendto for the server.
 static bool (*orig_Sys_SendPacket)(int, int, const uint8_t *, uint64_t, uint64_t);
 static bool hook_Sys_SendPacket(int socket_id, int length, const uint8_t *data, uint64_t lo, uint64_t hi) {
@@ -804,6 +840,8 @@ void boiii_client_install(void) {
     int c = DobbyHook(get_packet, (void *)hook_Sys_GetPacket, (void **)&orig_Sys_GetPacket);
     int d = DobbyHook(send_packet, (void *)hook_Sys_SendPacket, (void **)&orig_Sys_SendPacket);
     int e = DobbyHook(frontend, (void *)hook_Com_ReturnToFrontend, (void **)&orig_Com_ReturnToFrontend);
+    void *server_id = t7_resolve_function("CL_ParseServerId");
+    if (server_id) DobbyHook(server_id, (void *)hook_CL_ParseServerId, (void **)&orig_CL_ParseServerId);
     void *lookup = t7_resolve_function("LiveUser_GetControllerFromXuid");
     int f = lookup ? DobbyHook(lookup, (void *)hook_LiveUser_GetControllerFromXuid,
                                (void **)&orig_LiveUser_GetControllerFromXuid) : -1;
