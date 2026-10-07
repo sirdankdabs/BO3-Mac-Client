@@ -252,12 +252,15 @@ static bool hook_NET_OutOfBandData(int socket_id, uint64_t lo, uint64_t hi, cons
     return sent;
 }
 
+static volatile int signature_retries;
+
 static void accept_challenge(const uint8_t *bytes) {
     memcpy(challenge, bytes, sizeof(challenge));
     have_challenge = 1;
     int32_t *state = client_state(0);
     if (*state == CONNSTATE_CHALLENGING) *state = CONNSTATE_CONNECTING;
-    t7_log("[BO3MacFix] BOIII: challenge received, connecting\n");
+    t7_log("[BO3MacFix] BOIII: challenge %02x%02x%02x%02x... received, connecting\n",
+           challenge[0], challenge[1], challenge[2], challenge[3]);
 }
 
 // BOIII servers answer some out-of-band commands with raw "\xff\xff\xff\xff..."
@@ -275,6 +278,14 @@ static void handle_raw_packet(const uint8_t *data, size_t length) {
     text[n] = 0;
     if (strncmp(text, "profileInfo", 11) && strncmp(text, "playerXuid", 10))
         t7_log("[BO3MacFix] BOIII: server says: %s\n", text);
+    // The server verifies against the challenge it holds for our address; if
+    // that no longer matches ours, ask for a fresh one and connect again.
+    if (!strncmp(text, "error Bad signature", 19) && target.active && signature_retries < 3) {
+        ++signature_retries;
+        have_challenge = 0;
+        last_challenge_request = 0;
+        t7_log("[BO3MacFix] BOIII: requesting a fresh challenge (retry %d)\n", signature_retries);
+    }
 }
 
 // Called from the T7 connectionless filter before it decides. Returns true when
@@ -539,6 +550,7 @@ void boiii_frame(void) {
         target.launch = 0;
         target.active = 1;
         target.routing = 1;
+        signature_retries = 0;
         pthread_mutex_lock(&queue_lock);
         queue_head = queue_tail = 0;
         pthread_mutex_unlock(&queue_lock);
