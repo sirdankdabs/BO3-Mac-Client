@@ -615,15 +615,30 @@ static void server_id_outgoing(uint8_t *packet, size_t length) {
     sid.value = (sid.high << 4) | sid.low;
 }
 
-// Network thread (recvfrom): classify server netchan packets.
+// Network thread (recvfrom): classify server netchan packets. The channel
+// byte (offset 19) varies between servers/sessions, so only the reliable flag
+// and the size are used: gamestates are big reliable fragments; once in the
+// world the server streams unreliable snapshots, many per second.
 static void server_id_incoming(const uint8_t *bytes, size_t length) {
-    if (length < 26 || bytes[1] != 0xe0 || bytes[19] != 0x01) return;
-    if (bytes[18] == 0x40) {
-        int32_t seq;
-        memcpy(&seq, bytes + 21, 4);
+    if (length < 26 || bytes[1] != 0xe0) return;
+    int32_t seq;
+    memcpy(&seq, bytes + 21, 4);
+    if ((bytes[18] & 0x40) && length >= 800) {
         if (seq > sid.gamestate_seq) sid.gamestate_seq = seq;
-    } else if (bytes[18] == 0x00 && sid.searching && sid.sent_value && !sid.hit_value) {
-        sid.hit_value = sid.sent_value;
+        return;
+    }
+    if (bytes[18] != 0x00 || !sid.searching || !sid.sent_value || sid.hit_value) return;
+    static uint64_t window_start;
+    static int window_count, window_value;
+    uint64_t now = now_ms();
+    if (!window_start || now - window_start > 1000) {
+        window_start = now;
+        window_count = 0;
+        window_value = sid.sent_value;
+    }
+    if (++window_count >= 8) {
+        sid.hit_value = window_value;
+        window_start = 0;
     }
 }
 
