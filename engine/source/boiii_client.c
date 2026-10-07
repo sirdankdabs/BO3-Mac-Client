@@ -547,11 +547,11 @@ static int hook_LiveUser_GetControllerFromXuid(uint64_t xuid) {
 // step to the next value. Once in game the low nibble is fixed by watching
 // whether the server acknowledges our reliable commands. The last working id
 // per server is kept in boiii_serverids.txt as the next starting guess.
-#define PROBE_HOLD_MS 300
+#define PROBE_HOLD_MS 800
 #define PROBE_MIN_RTT 10
 static struct {
     int fixed, active, value, high, low, low_tries, last_state;
-    volatile int searching, sent_value, hit_value, alt_value, gamestate_seq, rejected;
+    volatile int searching, sent_value, hit_value, alt_value, gamestate_seq, rejected, hit_delay;
     uint64_t pending_since;
     // Recent probes (value, send time) to attribute the snapshot burst.
     struct { int value; uint64_t time; } sent[16];
@@ -694,6 +694,7 @@ static void server_id_incoming(const uint8_t *bytes, size_t length) {
             if (!hit) {
                 if (sid.sent[slot].time + PROBE_MIN_RTT <= window_start) {
                     hit = sid.sent[slot].value;
+                    sid.hit_delay = (int)(window_start - sid.sent[slot].time);
                     if (i + 1 < 16 && i + 1 < count) alt = sid.sent[(count - 2 - i) % 16].value;
                     break;
                 }
@@ -714,8 +715,8 @@ static void server_id_frame(void) {
         sid.searching = 0;
         sid.value = sid.hit_value;
         sid.high = sid.value >> 4;
-        t7_log("[BO3MacFix] BOIII: server accepted serverId 0x%02x (alternative 0x%02x), entering the game\n",
-               sid.value, sid.alt_value);
+        t7_log("[BO3MacFix] BOIII: server accepted serverId 0x%02x after %d ms (alternative 0x%02x), entering the game\n",
+               sid.value, sid.hit_delay, sid.alt_value);
         saved_server_id(true, sid.value);
     }
     (void)last;
