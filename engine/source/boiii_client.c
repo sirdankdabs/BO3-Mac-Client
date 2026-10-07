@@ -827,6 +827,14 @@ static char *hook_LiveSteam_GetPlayerName(uint64_t xuid, char *buffer, int size,
     return orig_LiveSteam_GetPlayerName(xuid, buffer, size, flag);
 }
 
+// Diagnostics: the reliable commands (chat, menu responses...) the client
+// sends to a community server.
+static void (*orig_CL_AddReliableCommand)(int, const char *);
+static void hook_CL_AddReliableCommand(int client, const char *command) {
+    if (target.routing && command) t7_log("[BO3MacFix] BOIII: client command: %.200s\n", command);
+    orig_CL_AddReliableCommand(client, command);
+}
+
 // Every gamestate the client actually parses. Its message sequence (what the
 // client acks, clc+0x4540) is the ack to clamp to while searching. A gamestate
 // after we settled on an id means the server rejected it or changed map.
@@ -1266,6 +1274,8 @@ void boiii_client_install(void) {
     int e = DobbyHook(frontend, (void *)hook_Com_ReturnToFrontend, (void **)&orig_Com_ReturnToFrontend);
     void *server_id = t7_resolve_function("CL_ParseServerId");
     if (server_id) DobbyHook(server_id, (void *)hook_CL_ParseServerId, (void **)&orig_CL_ParseServerId);
+    void *reliable = t7_resolve_function("CL_AddReliableCommand");
+    if (reliable) DobbyHook(reliable, (void *)hook_CL_AddReliableCommand, (void **)&orig_CL_AddReliableCommand);
     void *parse_gamestate = t7_resolve_function("CL_ParseGamestate");
     if (parse_gamestate)
         DobbyHook(parse_gamestate, (void *)hook_CL_ParseGamestate, (void **)&orig_CL_ParseGamestate);
