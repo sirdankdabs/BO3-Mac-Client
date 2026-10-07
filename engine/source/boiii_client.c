@@ -681,8 +681,11 @@ static void server_id_incoming(const uint8_t *bytes, size_t length) {
     static unsigned recent_count;
     uint64_t now = now_ms();
     recent[recent_count++ % 8] = now;
-    uint64_t window_start = recent[recent_count % 8];
-    int window_count = recent_count >= 8 && now - window_start <= 400 ? 8 : 0;
+    uint64_t oldest = recent[recent_count % 8];
+    int window_count = recent_count >= 8 && now - oldest <= 400 ? 8 : 0;
+    // The burst's start: skip the two oldest of the eight, which may be stray
+    // packets that arrived just before it.
+    uint64_t window_start = recent[(recent_count + 2) % 8];
     if (window_count >= 8) {
         // The server reacts to the first packet carrying the right id, so the
         // burst starts a round trip plus a server frame after that candidate
