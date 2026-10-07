@@ -58,7 +58,7 @@ The app is written to `dist/BO3 Mac Client.app`.
 
 - **BO3MacFix** by Emma / InvoxiPlayGames and Anthony / serious — the engine is a modified version of BO3MacFix (LGPL-2.1, see `engine/LICENSE.txt`). Modifications: T7Patch 3.09 fixes for the Mac build, community server client, launcher link and data directory.
 - **T7Patch** authors — the security and gameplay fixes ported to the Mac build.
-- [Dobby](https://github.com/jmpews/Dobby) (Apache-2.0), [LibTomCrypt / LibTomMath](https://github.com/libtom) (public domain / Unlicense).
+- [Dobby](https://github.com/jmpews/Dobby) for code hooking, and [LibTomCrypt / LibTomMath](https://github.com/libtom) for the identity keys (licenses in `engine/include/tomcrypt/`).
 - The community server project behind `master.ezz.lol` for the servers and master list.
 
 Not affiliated with or endorsed by Activision, Treyarch, Aspyr or Valve. Call of Duty and Black Ops are trademarks of Activision Publishing, Inc.
