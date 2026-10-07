@@ -710,11 +710,11 @@ static const char *info_value(const char *info, const char *name, char *out, siz
     return out;
 }
 
-static void *connect_thread(void *argument) {
-    char *text = argument;
+// Queries one server; on success arms the launch. Returns true when picked.
+static bool try_server(const char *text) {
     uint8_t ip[4]; uint16_t port;
     if (!resolve(text, ip, &port)) {
-        t7_log("[BO3MacFix] BOIII: cannot resolve '%s'\n", text); free(text); return NULL;
+        t7_log("[BO3MacFix] BOIII: cannot resolve '%s'\n", text); return false;
     }
     struct sockaddr_in to = {0};
     to.sin_family = AF_INET; to.sin_port = htons(port); memcpy(&to.sin_addr, ip, 4);
@@ -726,11 +726,11 @@ static void *connect_thread(void *argument) {
     sendto(sock, query, (size_t)query_length, 0, (struct sockaddr *)&to, sizeof(to));
     ssize_t received = recvfrom(sock, reply, sizeof(reply) - 1, 0, NULL, NULL);
     close(sock);
-    if (received <= 4) { t7_log("[BO3MacFix] BOIII: %s did not answer getInfo\n", text); free(text); return NULL; }
+    if (received <= 4) { t7_log("[BO3MacFix] BOIII: %s did not answer getInfo\n", text); return false; }
     reply[received] = 0;
     const char *info = strchr(reply + 4, '\n');
     info = info ? info + 1 : "";
-    char protocol[16], sub[16], game[16], map[64], gametype[64], workshop[64], usermap[64], host[128];
+    char clients[16], max_clients[16], protocol[16], sub[16], game[16], map[64], gametype[64], workshop[64], usermap[64], host[128];
     info_value(info, "protocol", protocol, sizeof(protocol));
     info_value(info, "sub_protocol", sub, sizeof(sub));
     info_value(info, "gamename", game, sizeof(game));
@@ -739,12 +739,17 @@ static void *connect_thread(void *argument) {
     info_value(info, "workshop_id", workshop, sizeof(workshop));
     info_value(info, "usermapId", usermap, sizeof(usermap));
     info_value(info, "hostname", host, sizeof(host));
+    info_value(info, "clients", clients, sizeof(clients));
+    info_value(info, "sv_maxclients", max_clients, sizeof(max_clients));
     t7_log("[BO3MacFix] BOIII: %s '%s' map %s %s protocol %s/%s\n", text, host, map, gametype, protocol, sub);
     if (strcmp(protocol, "8") || (strcmp(sub, "1") && strcmp(sub, "0")) || strcmp(game, "T7") || !*map || !*gametype) {
-        t7_log("[BO3MacFix] BOIII: unsupported server (protocol/gamename)\n"); free(text); return NULL;
+        t7_log("[BO3MacFix] BOIII: unsupported server (protocol/gamename)\n"); return false;
     }
     if (*workshop || *usermap) {
-        t7_log("[BO3MacFix] BOIII: server needs workshop content, not supported yet\n"); free(text); return NULL;
+        t7_log("[BO3MacFix] BOIII: server needs workshop content, not supported yet\n"); return false;
+    }
+    if (*max_clients && atoi(clients) >= atoi(max_clients)) {
+        t7_log("[BO3MacFix] BOIII: %s is full (%s/%s)\n", text, clients, max_clients); return false;
     }
     memcpy(target.ip, ip, 4);
     target.port = port;
@@ -753,7 +758,17 @@ static void *connect_thread(void *argument) {
     snprintf(target.printable, sizeof(target.printable), "%s", text);
     have_challenge = 0;
     target.launch = 1; // picked up by boiii_frame on the main thread
-    free(text);
+    return true;
+}
+
+// Accepts one server or a comma-separated list; joins the first usable one.
+static void *connect_thread(void *argument) {
+    char *list = argument, *cursor = list, *item;
+    bool picked = false;
+    while (!picked && (item = strsep(&cursor, ", ")))
+        if (*item) picked = try_server(item);
+    if (!picked) t7_log("[BO3MacFix] BOIII: no usable server (all full or unsupported)\n");
+    free(list);
     return NULL;
 }
 
