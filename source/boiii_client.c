@@ -115,6 +115,10 @@ static struct {
 } target;
 static uint8_t challenge[32];
 static volatile int have_challenge;
+// OX's BOIII server issues a new challenge on every "getchallenge" and only
+// accepts a signature over the latest one, so each connect uses a challenge
+// requested just before it, once.
+static volatile int challenge_used;
 static uint64_t last_challenge_request;
 
 static uint8_t *client_server_address(int client) {
@@ -212,6 +216,14 @@ static bool hook_NET_OutOfBandData(int socket_id, uint64_t lo, uint64_t hi, cons
     char connect[1700];
     if (!rewrite_connect((const char *)data, length, connect, sizeof(connect)))
         return orig_NET_OutOfBandData(socket_id, lo, hi, data, length);
+    if (challenge_used) {
+        // A resend: fetch a fresh challenge first (CL_CheckForResend hook), the
+        // game sends connect again once it arrives.
+        have_challenge = 0;
+        last_challenge_request = 0;
+        return true;
+    }
+    challenge_used = 1;
 
     unsigned char digest[64], signature[256];
     unsigned long digest_length = sizeof(digest), signature_length = sizeof(signature);
@@ -253,9 +265,9 @@ static bool hook_NET_OutOfBandData(int socket_id, uint64_t lo, uint64_t hi, cons
 }
 
 static volatile int signature_retries;
-
 static void accept_challenge(const uint8_t *bytes) {
     memcpy(challenge, bytes, sizeof(challenge));
+    challenge_used = 0;
     have_challenge = 1;
     int32_t *state = client_state(0);
     if (*state == CONNSTATE_CHALLENGING) *state = CONNSTATE_CONNECTING;
