@@ -340,6 +340,14 @@ bool boiii_connectionless(const char *command, const void *msg) {
 // addresses it has no connection for, so traffic with the BOIII server is
 // carried on the game's UDP socket directly and fed back through Sys_GetPacket.
 static volatile int game_socket = -1;
+// Traffic counters for diagnostics (logged every 5 s while routing).
+static volatile unsigned stat_sent, stat_sent_bytes, stat_recv, stat_recv_bytes, stat_raw, stat_injected, stat_dropped;
+static volatile unsigned logged_sent;
+static void hex_prefix(const uint8_t *data, size_t length, char *out, size_t capacity) {
+    size_t used = 0;
+    for (size_t i = 0; i < length && used + 3 < capacity; ++i) used += (size_t)snprintf(out + used, capacity - used, "%02x", data[i]);
+    out[used] = 0;
+}
 static volatile uint64_t server_xuid;
 
 #define QUEUE_SIZE 256
@@ -358,7 +366,10 @@ static ssize_t recvfrom_hook(int fd, void *buffer, size_t capacity, int flags, s
         ssize_t received = recvfrom(fd, buffer, capacity, flags, from, from_length);
         if (received <= 0 || !target.routing || fd != game_socket || !from_server(from)) return received;
         const uint8_t *bytes = buffer;
+        ++stat_recv;
+        stat_recv_bytes += (unsigned)received;
         if (received >= 4 && !memcmp(bytes, "\xff\xff\xff\xff", 4)) {
+            ++stat_raw;
             handle_raw_packet(bytes, (size_t)received);
         } else if ((size_t)received <= sizeof(packet_queue[0].data)) {
             // Netchan packets: [socket byte][type][u64 dest xuid][u64 from xuid]...
@@ -376,8 +387,10 @@ static ssize_t recvfrom_hook(int fd, void *buffer, size_t capacity, int flags, s
                 memcpy(packet_queue[queue_tail % QUEUE_SIZE].data, bytes, (size_t)received);
                 packet_queue[queue_tail % QUEUE_SIZE].length = (uint16_t)received;
                 ++queue_tail;
-            }
+            } else ++stat_dropped;
             pthread_mutex_unlock(&queue_lock);
+        } else {
+            ++stat_dropped;
         }
         // Hidden from Demonware; read the next datagram (the socket is non-blocking).
     }
@@ -418,6 +431,7 @@ static bool hook_Sys_GetPacket(uint8_t *from, uint8_t *msg) {
                 uint8_t *advanced = data + 1;
                 memcpy(msg + 8, &advanced, sizeof(advanced));
                 memcpy(msg + 0x1c, &size, 4); // cursize
+                ++stat_injected;
                 return true;
             }
         }
@@ -459,6 +473,14 @@ static bool hook_Sys_SendPacket(int socket_id, int length, const uint8_t *data, 
         uint8_t packet[1601];
         packet[0] = (uint8_t)((socket_id & 0xf) | (((int)(hi >> 32) & 0xf) << 4));
         memcpy(packet + 1, data, (size_t)length);
+        ++stat_sent;
+        stat_sent_bytes += (unsigned)length + 1;
+        if (logged_sent < 6 && length >= 4 && memcmp(data, "\xff\xff\xff\xff", 4)) {
+            ++logged_sent;
+            char hex[80];
+            hex_prefix(packet, length + 1 < 24 ? (size_t)length + 1 : 24, hex, sizeof(hex));
+            t7_log("[BO3MacFix] BOIII: client packet %d bytes: %s\n", length + 1, hex);
+        }
         struct sockaddr_in to = {0};
         to.sin_family = AF_INET;
         to.sin_port = htons(target.port);
@@ -610,6 +632,8 @@ void boiii_frame(void) {
         target.routing = 1;
         signature_retries = 0;
         server_xuid = 0;
+        stat_sent = stat_sent_bytes = stat_recv = stat_recv_bytes = stat_raw = stat_injected = stat_dropped = 0;
+        logged_sent = 0;
         pthread_mutex_lock(&queue_lock);
         queue_head = queue_tail = 0;
         pthread_mutex_unlock(&queue_lock);
@@ -636,6 +660,14 @@ void boiii_frame(void) {
             target.routing = 0;
         }
         return;
+    }
+    static uint64_t next_stats;
+    if (target.routing && now_ms() >= next_stats) {
+        if (next_stats)
+            t7_log("[BO3MacFix] BOIII: state %d sent %u/%uB recv %u/%uB raw %u injected %u dropped %u\n",
+                   *client_state(0), stat_sent, stat_sent_bytes, stat_recv, stat_recv_bytes, stat_raw, stat_injected,
+                   stat_dropped);
+        next_stats = now_ms() + 5000;
     }
     // CL_WritePacket sends to the netchan peer at clc+0x24b68 (xuid) /
     // clc+0x2455c (address). The menu's lobby made us our own "host", so point
