@@ -121,6 +121,28 @@ static volatile int have_challenge;
 static volatile int challenge_used;
 static uint64_t last_challenge_request;
 
+// Controller XUIDs live at *(*(0x20915f0 + 8*controller)) (read by
+// LiveUser_GetControllerFromXuid, 0x103a79e). BOIII servers address us by the
+// key-derived XUID, so controller 0 uses it while a BOIII session is active and
+// gets its Steam XUID back afterwards.
+static uint64_t saved_xuid;
+static int xuid_swapped;
+static void use_boiii_xuid(bool enable) {
+    uint64_t *slot = *(uint64_t **)MAC_ADDR(0x20915f0);
+    if (!slot || !t7_memory_writable(slot, sizeof(*slot))) return;
+    if (enable && !xuid_swapped) {
+        saved_xuid = *slot;
+        *slot = key_xuid;
+        xuid_swapped = 1;
+        t7_log("[BO3MacFix] BOIII: controller 0 xuid %llx -> %llx\n", (unsigned long long)saved_xuid,
+               (unsigned long long)key_xuid);
+    } else if (!enable && xuid_swapped) {
+        if (*slot == key_xuid) *slot = saved_xuid;
+        xuid_swapped = 0;
+        t7_log("[BO3MacFix] BOIII: controller 0 xuid restored\n");
+    }
+}
+
 static uint8_t *client_server_address(int client) {
     uintptr_t base = *(uintptr_t *)MAC_ADDR(0x115345a0);
     return base ? (uint8_t *)(base + (uintptr_t)client * 0x25780 + 0x10) : NULL;
@@ -397,11 +419,21 @@ static bool hook_Sys_GetPacket(uint8_t *from, uint8_t *msg) {
 // the client off the server. Defer it until the BOIII session is over.
 static void (*orig_Com_ReturnToFrontend)(void);
 static volatile int frontend_deferred;
+static void use_boiii_xuid(bool enable);
 static void hook_Com_ReturnToFrontend(void) {
-    if (target.routing) {
+    if (target.active) {
+        // Still connecting: this is the lobby reacting to the killed menu server.
         if (!frontend_deferred) t7_log("[BO3MacFix] BOIII: deferring return to frontend\n");
         frontend_deferred = 1;
         return;
+    }
+    if (target.routing) {
+        // Connected and the game is going back to the menu (disconnect/error):
+        // end the BOIII session first, then let it proceed normally.
+        t7_log("[BO3MacFix] BOIII: session ended, returning to frontend\n");
+        target.routing = 0;
+        use_boiii_xuid(false);
+        frontend_deferred = 0;
     }
     orig_Com_ReturnToFrontend();
 }
@@ -580,6 +612,7 @@ void boiii_frame(void) {
             t7_log("[BO3MacFix] BOIII: stopping the menu's local server\n");
             Com_KillLocalServerForLaunch();
         }
+        use_boiii_xuid(true);
         t7_log("[BO3MacFix] BOIII: launching client for %s %s (state %d)\n", target.map, target.gametype,
                *client_state(0));
         if (!CL_LaunchClient(target.map, target.gametype, &error)) {
@@ -603,6 +636,7 @@ void boiii_frame(void) {
         t7_log("[BO3MacFix] BOIII: left %s\n", target.printable);
         target.routing = 0;
     }
+    if (!target.routing && xuid_swapped) use_boiii_xuid(false);
     if (!target.routing && frontend_deferred) {
         frontend_deferred = 0;
         t7_log("[BO3MacFix] BOIII: returning to frontend\n");
