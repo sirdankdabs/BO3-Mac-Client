@@ -387,6 +387,8 @@ static bool from_server(const struct sockaddr *from) {
     return !memcmp(&in->sin_addr, target.ip, 4) && ntohs(in->sin_port) == target.port;
 }
 
+static void server_id_incoming(const uint8_t *bytes, size_t length);
+
 static ssize_t recvfrom_hook(int fd, void *buffer, size_t capacity, int flags, struct sockaddr *from, socklen_t *from_length) {
     for (;;) {
         ssize_t received = recvfrom(fd, buffer, capacity, flags, from, from_length);
@@ -407,6 +409,7 @@ static ssize_t recvfrom_hook(int fd, void *buffer, size_t capacity, int flags, s
                 hex_prefix(bytes, received < 190 ? (size_t)received : 190, hex, sizeof(hex));
                 t7_log("[BO3MacFix] BOIII: S> %zd: %s\n", received, hex);
             }
+            server_id_incoming(bytes, (size_t)received);
             // Netchan packets: [socket byte][type][u64 dest xuid][u64 from xuid]...
             if (!server_xuid && received >= 18) {
                 uint64_t dest, from_xuid;
@@ -521,17 +524,25 @@ static int hook_LiveUser_GetControllerFromXuid(uint64_t xuid) {
 // sv.serverId = (old + 0x10) & 0xff per map load, high nibble never 0; the low
 // nibble only moves on map_restart.
 //
-// Search: every gamestate after the first one means the server rejected the
-// id we sent (or loaded a new map, which also adds 0x10), so step the high
-// nibble on each new gamestate and keep it while none arrives. The client can
-// take a while to go active after the server lets it in, so no timers here.
-// Once in game, fix the low nibble by watching whether the server
-// acknowledges our reliable commands. The last working id per server is kept
-// in boiii_serverids.txt as the next starting guess.
+// Search without reloading the map: the server only resends the gamestate
+// when a mismatching packet acknowledges a message newer than the gamestate
+// (messageAck > gamestateMessageNum). While searching, outgoing data packets
+// carry their ack clamped to the gamestate's sequence, and each packet tries
+// the next high nibble. The packet that matches puts us in the world and the
+// server starts streaming snapshots (unreliable channel-1 messages), which
+// tells us the id. Wire layout of a client data packet (after the socket
+// byte): [e0][u64 dest][u64 from][01 01 00][u32 seq][00][01][u16 len]
+// [serverId][u32 messageAck][u32 reliableAck]... (packet offsets 29 / 30).
+// Server: [e0][dest][from][flags: 40 reliable][channel][00][u32 seq]...
+// Fallback: if a new gamestate gets through anyway (CA_PRIMED -> loading),
+// step to the next value. Once in game the low nibble is fixed by watching
+// whether the server acknowledges our reliable commands. The last working id
+// per server is kept in boiii_serverids.txt as the next starting guess.
 static struct {
-    int fixed, active, value, high, low, low_tries, gamestates;
+    int fixed, active, value, high, low, low_tries, last_state;
+    volatile int searching, sent_value, hit_value, gamestate_seq;
     uint64_t pending_since;
-} sid = {0, 0, 0x10, 1, 0, 0, 0, 0};
+} sid;
 
 static void set_server_id(int value) {
     uintptr_t cl = *(uintptr_t *)MAC_ADDR(0x11534598);
@@ -574,36 +585,81 @@ static void server_id_reset(void) {
     sid.high = value >> 4;
     sid.low = value & 0xf;
     sid.low_tries = 0;
-    sid.gamestates = 0;
+    sid.last_state = 0;
+    sid.searching = !sid.fixed;
+    sid.sent_value = sid.hit_value = 0;
+    sid.gamestate_seq = -1;
     sid.pending_since = 0;
     t7_log("[BO3MacFix] BOIII: serverId starts at 0x%02x%s\n", value, sid.fixed ? " (fixed in bo3macfix.conf)" : "");
 }
 
-// Called for every gamestate the client parses.
-static void server_id_gamestate(void) {
-    if (++sid.gamestates > 1 && !sid.fixed) {
-        sid.high = sid.high % 15 + 1;
-        sid.value = (sid.high << 4) | sid.low;
-        t7_log("[BO3MacFix] BOIII: gamestate #%d, server rejected the id; trying 0x%02x\n", sid.gamestates, sid.value);
+// Main thread (Sys_SendPacket): rewrite an outgoing data packet while searching.
+static void server_id_outgoing(uint8_t *packet, size_t length) {
+    if (!sid.searching || length < 38 || packet[1] != 0xe0 || packet[18] != 0x01 || packet[26] != 0x01) return;
+    if (*client_state(0) < 10) return;
+    packet[29] = (uint8_t)sid.value;
+    int32_t ack;
+    memcpy(&ack, packet + 30, 4);
+    if (sid.gamestate_seq >= 0 && ack > sid.gamestate_seq) {
+        int32_t clamped = sid.gamestate_seq;
+        memcpy(packet + 30, &clamped, 4);
     }
-    sid.active = 0;
-    set_server_id(sid.value);
+    sid.sent_value = sid.value;
+    static unsigned logged;
+    if (logged < 40) {
+        ++logged;
+        t7_log("[BO3MacFix] BOIII: trying serverId 0x%02x (ack %d, gamestate %d)\n", sid.value, ack, sid.gamestate_seq);
+    }
+    // Next packet tries the next high nibble.
+    sid.high = sid.high % 15 + 1;
+    sid.value = (sid.high << 4) | sid.low;
+}
+
+// Network thread (recvfrom): classify server netchan packets.
+static void server_id_incoming(const uint8_t *bytes, size_t length) {
+    if (length < 26 || bytes[1] != 0xe0 || bytes[19] != 0x01) return;
+    if (bytes[18] == 0x40) {
+        int32_t seq;
+        memcpy(&seq, bytes + 21, 4);
+        if (seq > sid.gamestate_seq) sid.gamestate_seq = seq;
+    } else if (bytes[18] == 0x00 && sid.searching && sid.sent_value && !sid.hit_value) {
+        sid.hit_value = sid.sent_value;
+    }
 }
 
 // Main thread, every frame while routing.
 static void server_id_frame(void) {
     int32_t state = *client_state(0);
+    int32_t last = sid.last_state;
+    sid.last_state = state;
+    if (sid.searching && sid.hit_value) {
+        sid.searching = 0;
+        sid.value = sid.hit_value;
+        sid.high = sid.value >> 4;
+        t7_log("[BO3MacFix] BOIII: server accepted serverId 0x%02x, entering the game\n", sid.value);
+        saved_server_id(true, sid.value);
+    }
+    if (last >= 10 && state < 10 && state > 4) {
+        // A new gamestate got through: wrong id (or the server changed map).
+        sid.active = 0;
+        if (!sid.fixed) {
+            sid.high = sid.high % 15 + 1;
+            sid.value = (sid.high << 4) | sid.low;
+            sid.searching = 1;
+            sid.hit_value = sid.sent_value = 0;
+            t7_log("[BO3MacFix] BOIII: new gamestate, searching the serverId again from 0x%02x\n", sid.value);
+        }
+    }
     if (state < 9) return;
-    set_server_id(sid.value);
+    if (!sid.searching) set_server_id(sid.value);
     if (state <= 10) return;
     uint64_t now = now_ms();
     if (!sid.active) {
         sid.active = 1;
         sid.pending_since = 0;
         t7_log("[BO3MacFix] BOIII: in game (state %d), serverId 0x%02x\n", state, sid.value);
-        if (!sid.fixed) saved_server_id(true, sid.value);
     }
-    if (sid.fixed) return;
+    if (sid.fixed || sid.searching) return;
     // Low nibble: with only the high nibble right the server ignores our
     // packets, so our reliable commands (clc+0x130 sent, +0x134 acked) stay
     // unacknowledged.
@@ -623,8 +679,6 @@ static void server_id_frame(void) {
     }
 }
 
-// CL_ParseServerId runs from CL_ParseGamestate (0xecaa64..0xecb04d) and when
-// config string 3 changes.
 static void (*orig_CL_ParseServerId)(int);
 static void hook_CL_ParseServerId(int client) {
     orig_CL_ParseServerId(client);
@@ -632,9 +686,7 @@ static void hook_CL_ParseServerId(int client) {
     const char *(*get_configstring)(int) = t7_resolve_function("CL_GetConfigString");
     const char *direct = get_configstring ? get_configstring(3) : NULL;
     if (direct && *direct) return;
-    uintptr_t caller = (uintptr_t)__builtin_return_address(0);
-    if (caller >= MAC_ADDR(0xecaa64) && caller < MAC_ADDR(0xecb04d)) server_id_gamestate();
-    else set_server_id(sid.value);
+    set_server_id(sid.value);
 }
 
 // Sys_SendPacket(netsrc, length, data, netadr_t to): plain sendto for the server.
@@ -649,6 +701,7 @@ static bool hook_Sys_SendPacket(int socket_id, int length, const uint8_t *data, 
             uint64_t from_xuid;
             memcpy(&from_xuid, packet + 10, 8);
             if (steam_xuid && from_xuid == steam_xuid) memcpy(packet + 10, &key_xuid, 8);
+            server_id_outgoing(packet, (size_t)length + 1);
         }
         ++stat_sent;
         stat_sent_bytes += (unsigned)length + 1;
@@ -884,7 +937,7 @@ void boiii_frame(void) {
     if (target.routing && now_ms() >= next_stats) {
         if (next_stats)
             t7_log("[BO3MacFix] BOIII: serverId 0x%02x%s state %d sent %u/%uB recv %u/%uB raw %u injected %u dropped %u\n",
-                   sid.value, sid.active ? " (in game)" : "", *client_state(0), stat_sent, stat_sent_bytes, stat_recv, stat_recv_bytes, stat_raw, stat_injected,
+                   sid.value, sid.searching ? " (searching)" : sid.active ? " (in game)" : "", *client_state(0), stat_sent, stat_sent_bytes, stat_recv, stat_recv_bytes, stat_raw, stat_injected,
                    stat_dropped);
         next_stats = now_ms() + 5000;
     }
