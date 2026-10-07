@@ -1369,6 +1369,18 @@ void boiii_client_install(void) {
     int e = DobbyHook(frontend, (void *)hook_Com_ReturnToFrontend, (void **)&orig_Com_ReturnToFrontend);
     void *server_id = t7_resolve_function("CL_ParseServerId");
     if (server_id) DobbyHook(server_id, (void *)hook_CL_ParseServerId, (void **)&orig_CL_ParseServerId);
+    // Community servers register assets from their server-side mods (perks,
+    // weapons, HUD strings) that the client doesn't have; the client's BG
+    // cache check then drops with EXE_ERR_BG_CACHE "Client/Server Index
+    // Mismatch". The Windows client patches the check out
+    // (BG_Cache_CheckForChecksumMismatchForClient); same here: the "no
+    // mismatch -> return" je at 0x12a2453 becomes jmp.
+    uint8_t *bg_cache_check = (uint8_t *)MAC_ADDR(0x12a2453);
+    if (bg_cache_check[0] == 0x74 && bg_cache_check[1] == 0x33) {
+        uint8_t jmp = 0xeb;
+        int patched = DobbyCodePatch(bg_cache_check, &jmp, 1);
+        t7_log("[BO3MacFix] BOIII: BG cache mismatch check %s\n", patched == 0 ? "disabled" : "patch failed");
+    }
     void *reliable = t7_resolve_function("CL_AddReliableCommand");
     if (reliable) DobbyHook(reliable, (void *)hook_CL_AddReliableCommand, (void **)&orig_CL_AddReliableCommand);
     void *parse_gamestate = t7_resolve_function("CL_ParseGamestate");
