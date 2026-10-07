@@ -343,6 +343,29 @@ static volatile int game_socket = -1;
 // Traffic counters for diagnostics (logged every 5 s while routing).
 static volatile unsigned stat_sent, stat_sent_bytes, stat_recv, stat_recv_bytes, stat_raw, stat_injected, stat_dropped;
 static volatile unsigned logged_sent;
+static void hex_prefix(const uint8_t *data, size_t length, char *out, size_t capacity);
+// Logs each distinct out-of-band command (first word) once per direction.
+static void log_oob_once(const char *direction, const uint8_t *data, size_t length) {
+    static char seen[64][24];
+    static unsigned count;
+    char word[24];
+    size_t n = 0;
+    while (n < length && n < sizeof(word) - 1 && data[n] > 0x20 && data[n] < 0x7f) { word[n] = (char)data[n]; ++n; }
+    word[n] = 0;
+    char key[24];
+    snprintf(key, sizeof(key), "%c%s", direction[0], word);
+    for (unsigned i = 0; i < count; ++i) if (!strcmp(seen[i], key)) return;
+    if (count < 64) snprintf(seen[count++], sizeof(seen[0]), "%s", key);
+    t7_log("[BO3MacFix] BOIII: %s OOB '%s' (%zu bytes)\n", direction, word, length);
+}
+static void log_type_once(const uint8_t *packet, size_t length) {
+    static uint8_t seen[256];
+    if (length < 2 || seen[packet[1]]) return;
+    seen[packet[1]] = 1;
+    char hex[80];
+    hex_prefix(packet, length < 28 ? length : 28, hex, sizeof(hex));
+    t7_log("[BO3MacFix] BOIII: server packet type %02x, %zu bytes: %s\n", packet[1], length, hex);
+}
 static void hex_prefix(const uint8_t *data, size_t length, char *out, size_t capacity) {
     size_t used = 0;
     for (size_t i = 0; i < length && used + 3 < capacity; ++i) used += (size_t)snprintf(out + used, capacity - used, "%02x", data[i]);
@@ -372,6 +395,8 @@ static ssize_t recvfrom_hook(int fd, void *buffer, size_t capacity, int flags, s
             ++stat_raw;
             handle_raw_packet(bytes, (size_t)received);
         } else if ((size_t)received <= sizeof(packet_queue[0].data)) {
+            if (received >= 6 && !memcmp(bytes + 1, "\xff\xff\xff\xff", 4)) log_oob_once("server", bytes + 5, (size_t)received - 5);
+            else log_type_once(bytes, (size_t)received);
             // Netchan packets: [socket byte][type][u64 dest xuid][u64 from xuid]...
             if (!server_xuid && received >= 18) {
                 uint64_t dest, from_xuid;
@@ -475,6 +500,7 @@ static bool hook_Sys_SendPacket(int socket_id, int length, const uint8_t *data, 
         memcpy(packet + 1, data, (size_t)length);
         ++stat_sent;
         stat_sent_bytes += (unsigned)length + 1;
+        if (length >= 5 && !memcmp(data, "\xff\xff\xff\xff", 4)) log_oob_once("client", data + 4, (size_t)length - 4);
         if (logged_sent < 6 && length >= 4 && memcmp(data, "\xff\xff\xff\xff", 4)) {
             ++logged_sent;
             char hex[80];
