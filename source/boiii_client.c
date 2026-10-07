@@ -218,7 +218,11 @@ static bool rewrite_connect(const char *data, int length, char *out, size_t capa
         *value++ = 0;
         char *next = strchr(value, '\\');
         if (next) *next++ = 0;
-        if (!strcmp(name, "xuid")) {
+        const char *custom_name = getenv("BO3MACFIX_PLAYERNAME");
+        if (!strcmp(name, "name") && custom_name && *custom_name && strlen(custom_name) <= 16 &&
+            !strpbrk(custom_name, "\\\";%")) {
+            used += (size_t)snprintf(out + used, capacity - used, "\\name\\%s", custom_name);
+        } else if (!strcmp(name, "xuid")) {
             used += (size_t)snprintf(out + used, capacity - used, "\\xuid\\%llx", (unsigned long long)key_xuid);
             wrote_xuid = true;
         } else {
@@ -662,19 +666,9 @@ static void server_id_outgoing(uint8_t *packet, size_t length) {
 // world the server streams unreliable snapshots, many per second.
 static void server_id_incoming(const uint8_t *bytes, size_t length) {
     if (length < 26 || bytes[1] != 0xe0) return;
-    if ((bytes[18] & 0x40) && length >= 800) {
-        // Gamestate. The first fragment ([25] = 0) carries the game's message
-        // sequence (the number the client acks) at offset 29; offset 21 is
-        // the netchan's own sequence, a different counter.
-        int32_t seq;
-        memcpy(&seq, bytes + 29, 4);
-        if (bytes[25] == 0 && seq > sid.gamestate_seq) {
-            // A new gamestate after we settled on an id: the server rejected it.
-            if (sid.gamestate_seq >= 0 && !sid.searching && !sid.fixed) sid.rejected = 1;
-            sid.gamestate_seq = seq;
-        }
-        return;
-    }
+    // Big reliable messages: gamestates (tracked in hook_CL_ParseGamestate)
+    // or large server commands; neither is part of a snapshot burst.
+    if ((bytes[18] & 0x40) && length >= 800) return;
     if (bytes[18] != 0x00 || !sid.searching || !sid.sent_value || sid.hit_value) return;
     // Burst = 8 unreliable packets within 400 ms; it starts at the oldest.
     static uint64_t recent[8];
@@ -791,6 +785,48 @@ static int hook_CL_CGameNeedsServerCommand(int client, int number) {
         }
     }
     return orig_CL_CGameNeedsServerCommand(client, number);
+}
+
+// Chat names. Community servers send chat as "v <id> ..." where <id> is the
+// sender's client number + 1 (or -1 for the server itself) instead of a Steam
+// id; the game asks Steam for that id's name and shows "Unknown Soldier".
+// Resolve those ids from the cgame's client info (what the scoreboard uses:
+// cg = *(0x145b9fd0) + lc * 0x342a80, client i at +i*0xed0, valid flag at
+// +0x2e7ba0, name at +0x2e7bac, clan tag at +0x2e7c20).
+static char *(*orig_LiveSteam_GetPlayerName)(uint64_t, char *, int, int);
+static char *hook_LiveSteam_GetPlayerName(uint64_t xuid, char *buffer, int size, int flag) {
+    if (!target.routing || !buffer || size <= 0) return orig_LiveSteam_GetPlayerName(xuid, buffer, size, flag);
+    if (xuid == 0 || xuid == 0xffffffffull || xuid == ~0ull) {
+        snprintf(buffer, (size_t)size, "%s", "Server");
+        return buffer;
+    }
+    if (xuid >= 1 && xuid <= 18) {
+        uintptr_t cg_array = *(uintptr_t *)MAC_ADDR(0x145b9fd0);
+        if (cg_array) {
+            const uint8_t *info = (const uint8_t *)cg_array + (xuid - 1) * 0xed0;
+            const char *name = (const char *)info + 0x2e7bac;
+            if (*(const int32_t *)(info + 0x2e7ba0) && name[0]) {
+                snprintf(buffer, (size_t)size, "%.31s", name);
+                return buffer;
+            }
+        }
+    }
+    return orig_LiveSteam_GetPlayerName(xuid, buffer, size, flag);
+}
+
+// Every gamestate the client actually parses. Its message sequence (what the
+// client acks, clc+0x4540) is the ack to clamp to while searching. A gamestate
+// after we settled on an id means the server rejected it or changed map.
+static void (*orig_CL_ParseGamestate)(int, void *);
+static void hook_CL_ParseGamestate(int client, void *msg) {
+    orig_CL_ParseGamestate(client, msg);
+    if (!target.routing || client != 0) return;
+    uintptr_t clc = *(uintptr_t *)MAC_ADDR(0x115345a0);
+    if (!clc) return;
+    int32_t seq = *(int32_t *)(clc + 0x4540);
+    if (sid.gamestate_seq >= 0 && !sid.searching && sid.sent_value && !sid.fixed) sid.rejected = 1;
+    sid.gamestate_seq = seq;
+    t7_log("[BO3MacFix] BOIII: gamestate parsed (message %d)%s\n", seq, sid.rejected ? ", searching the id again" : "");
 }
 
 static void (*orig_CL_ParseServerId)(int);
@@ -979,8 +1015,38 @@ static void boiii_connect_command(void) {
 static uint64_t auto_connect_at;
 static char auto_connect_target[128];
 
+void boiii_browser_open(void);
+bool boiii_browser_enabled(void);
+
+void boiii_connect_to(const char *address) { start_connect(address); }
+void boiii_file_path(const char *name, char *out, size_t capacity) { file_next_to_dylib(name, out, capacity); }
+
+static void boiii_servers_command(void) {
+    if (!enabled()) { t7_log("[BO3MacFix] BOIII: set BO3MACFIX_BOIII=1 in bo3macfix.conf first\n"); return; }
+    boiii_browser_open();
+}
+
+// Server list: shown once each time the Zombies menu is reached (and again
+// after leaving a server). Closing it keeps the player in the menu.
+static uint64_t browser_at;
+static bool browser_armed = true, was_routing;
+static void browser_frame(void) {
+    if (!enabled() || !boiii_browser_enabled()) return;
+    if (was_routing && !target.routing) browser_armed = true; // left a server
+    was_routing = target.routing;
+    if (!bo3_is_zombies()) { browser_armed = true; browser_at = 0; return; }
+    if (!browser_armed || target.routing || target.active) return;
+    if (!browser_at) { browser_at = now_ms() + 3000; return; }
+    if (now_ms() < browser_at) return;
+    browser_armed = false;
+    browser_at = 0;
+    t7_log("[BO3MacFix] BOIII: Zombies menu detected, opening the server list\n");
+    boiii_browser_open();
+}
+
 // Main thread, once per frame.
 void boiii_frame(void) {
+    browser_frame();
     // Auto-connect once the player has been sitting in the Zombies menu (not
     // in a match) for 5 seconds.
     if (auto_connect_at) {
@@ -1122,6 +1188,12 @@ void boiii_client_install(void) {
     int e = DobbyHook(frontend, (void *)hook_Com_ReturnToFrontend, (void **)&orig_Com_ReturnToFrontend);
     void *server_id = t7_resolve_function("CL_ParseServerId");
     if (server_id) DobbyHook(server_id, (void *)hook_CL_ParseServerId, (void **)&orig_CL_ParseServerId);
+    void *parse_gamestate = t7_resolve_function("CL_ParseGamestate");
+    if (parse_gamestate)
+        DobbyHook(parse_gamestate, (void *)hook_CL_ParseGamestate, (void **)&orig_CL_ParseGamestate);
+    void *player_name = t7_resolve_function("LiveSteam_GetPlayerName");
+    if (player_name)
+        DobbyHook(player_name, (void *)hook_LiveSteam_GetPlayerName, (void **)&orig_LiveSteam_GetPlayerName);
     void *needs_command = t7_resolve_function("CL_CGameNeedsServerCommand");
     if (needs_command)
         DobbyHook(needs_command, (void *)hook_CL_CGameNeedsServerCommand, (void **)&orig_CL_CGameNeedsServerCommand);
@@ -1136,8 +1208,12 @@ void boiii_client_register(void) {
     static uint8_t command_storage[0x40];
     void (*add_command)(const char *, void (*)(void), void *) = (void *)MAC_ADDR(0xf7651d);
     add_command("boiii_connect", boiii_connect_command, command_storage);
+    static uint8_t servers_storage[0x40];
+    add_command("boiii_servers", boiii_servers_command, servers_storage);
     const char *automatic = getenv("BO3MACFIX_BOIII_CONNECT");
-    if (enabled() && automatic && *automatic) {
+    if (enabled() && boiii_browser_enabled()) {
+        t7_log("[BO3MacFix] BOIII: server list enabled (filter '%s')\n", getenv("BO3MACFIX_BOIII_BROWSER"));
+    } else if (enabled() && automatic && *automatic) {
         // Fires from boiii_frame once the Zombies menu is reached.
         snprintf(auto_connect_target, sizeof(auto_connect_target), "%s", automatic);
         auto_connect_at = now_ms() + 5000;

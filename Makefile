@@ -17,7 +17,7 @@ LDFLAGS = -dynamiclib -Llib -ldobby -ltomcrypt -ltommath -lc++
 
 FRAMEWORKS = -framework CoreFoundation -framework IOKit -framework AppKit -framework AudioToolbox -framework CoreAudio
 
-SOURCES = source/bo3macfix.c source/bo3macnative.m source/utilities.c source/steam.c source/exports.c source/network.c source/t7_protection.c source/t7_hooks.c source/steam_extra.c source/t7_log.c source/t7_lobby.c source/audio_fix.c source/boiii_probe.c source/boiii_client.c
+SOURCES = source/bo3macfix.c source/bo3macnative.m source/utilities.c source/steam.c source/exports.c source/network.c source/t7_protection.c source/t7_hooks.c source/steam_extra.c source/t7_log.c source/t7_lobby.c source/audio_fix.c source/boiii_probe.c source/boiii_client.c source/boiii_browser.c
 CXX_SOURCES = source/t7_resolver.cpp source/t7_lua.cpp
 CXX_OBJECTS = $(CXX_SOURCES:source/%.cpp=build/%.o)
 
