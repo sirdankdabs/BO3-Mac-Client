@@ -115,6 +115,7 @@ static volatile int have_challenge;
 // requested just before it, once.
 static volatile int challenge_used;
 static uint64_t last_challenge_request;
+static unsigned challenge_requests; // backs off so a silent server is not flooded
 
 // Controller XUIDs live at *(*(0x20915f0 + 8*controller)) (read by
 // LiveUser_GetControllerFromXuid, 0x103a79e). BOIII servers address us by the
@@ -174,8 +175,10 @@ static void hook_CL_CheckForResend(int client) {
             if (!have_challenge) {
                 *state = CONNSTATE_CHALLENGING;
                 uint64_t now = now_ms();
-                if (now - last_challenge_request >= 1000) {
+                uint64_t interval = challenge_requests < 3 ? 1000 : challenge_requests < 6 ? 3000 : 6000;
+                if (now - last_challenge_request >= interval) {
                     last_challenge_request = now;
+                    ++challenge_requests;
                     uint64_t lo, hi;
                     memcpy(&lo, address, 8); memcpy(&hi, address + 8, 8);
                     NET_OutOfBandPrint(CL_GetNetSrc(0), lo, hi, "getchallenge");
@@ -1159,6 +1162,7 @@ void boiii_frame(void) {
         t7_log("[BO3MacFix] BOIII: game socket fd %d\n", game_socket);
         target.started_ms = now_ms();
         last_challenge_request = 0;
+        challenge_requests = 0;
         const char *error = NULL;
         // CL_Connect skips the network handshake when cls.servername is already
         // "localhost" and the client is connected (the menu's local server).
