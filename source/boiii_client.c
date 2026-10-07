@@ -734,6 +734,21 @@ static void server_id_frame(void) {
     }
     if (state < 9) return;
     if (!sid.searching) set_server_id(sid.value);
+    // CL_SetCGameTime keeps the client PRIMED while the level's loading movie
+    // plays (bit 0x100 of the cinematic flags at 0x15999da0, read by
+    // 0x12f0109); on Windows the player can skip it, the Mac build shows no
+    // prompt. Once the level is loaded and the server has let us in, end the
+    // wait so the game starts right away instead of after the whole intro.
+    static uint64_t joined_at;
+    if (sid.searching || state != 10) joined_at = 0;
+    if (state == 10 && !sid.searching && sid.sent_value && level_loaded()) {
+        if (!joined_at) joined_at = now_ms();
+        volatile uint32_t *cinematic_flags = (volatile uint32_t *)MAC_ADDR(0x15999da0);
+        if (now_ms() - joined_at > 500 && (*cinematic_flags & 0x100)) {
+            *cinematic_flags &= ~0x100u;
+            t7_log("[BO3MacFix] BOIII: skipping the rest of the loading movie\n");
+        }
+    }
     if (state <= 10) return;
     uint64_t now = now_ms();
     if (!sid.active) {
