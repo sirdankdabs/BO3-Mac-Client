@@ -34,6 +34,7 @@ final class GameLauncher: ObservableObject {
         } else {
             gameAppURL = Self.detectGame()
         }
+        importClassicIdentityIfNeeded()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.readStatus() }
         readStatus()
     }
@@ -227,4 +228,71 @@ final class GameLauncher: ObservableObject {
     }
 
     func revealDataFolder() { NSWorkspace.shared.open(Self.dataDirectory) }
+
+    // MARK: - Identity
+    //
+    // Community servers know players by a P-521 key (libtomcrypt ecc_export
+    // PK_PRIVATE), not by Steam: ranks, VIP and stats follow the key. The same
+    // format is used by BO3MacFix (BO3MacFix/boiii_key.dat next to the game)
+    // and by the Windows client (%LOCALAPPDATA%\boiii\user\*-private.key).
+
+    static var keyURL: URL { dataDirectory.appendingPathComponent("boiii_key.dat") }
+
+    /// The player id the engine derived from the key (from its log), if known.
+    var playerID: String? {
+        guard let log = try? String(contentsOf: Self.dataDirectory.appendingPathComponent("engine.log"), encoding: .utf8)
+        else { return nil }
+        let marker = "identity xuid "
+        guard let range = log.range(of: marker, options: .backwards) else { return nil }
+        return String(log[range.upperBound...].prefix { $0.isHexDigit })
+    }
+
+    var hasIdentity: Bool { FileManager.default.fileExists(atPath: Self.keyURL.path) }
+
+    /// First run next to an existing BO3MacFix install: keep the same identity.
+    private func importClassicIdentityIfNeeded() {
+        guard !hasIdentity, let app = gameAppURL else { return }
+        let classic = app.deletingLastPathComponent().appendingPathComponent("BO3MacFix/boiii_key.dat")
+        if Self.looksLikeKey(classic) { try? FileManager.default.copyItem(at: classic, to: Self.keyURL) }
+    }
+
+    static func looksLikeKey(_ url: URL) -> Bool {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attributes[.size] as? Int else { return false }
+        return size > 64 && size < 4096
+    }
+
+    func importIdentity() {
+        let panel = NSOpenPanel()
+        panel.title = "Import Identity Key"
+        panel.message = "Choose a key from BO3MacFix (boiii_key.dat) or the Windows client (…-private.key)."
+        panel.showsHiddenFiles = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard Self.looksLikeKey(url) else { alert = "That file doesn't look like an identity key."; return }
+        if isEngineRunning { alert = "Quit the game first, then import the key."; return }
+        let fm = FileManager.default
+        if hasIdentity {
+            let backup = Self.dataDirectory.appendingPathComponent("boiii_key.backup-\(Int(Date().timeIntervalSince1970)).dat")
+            try? fm.moveItem(at: Self.keyURL, to: backup)
+        }
+        do {
+            try fm.copyItem(at: url, to: Self.keyURL)
+            objectWillChange.send()
+            alert = "Identity imported. It will be used the next time you join a server."
+        } catch {
+            alert = "Couldn't import the key: \(error.localizedDescription)"
+        }
+    }
+
+    func exportIdentity() {
+        guard hasIdentity else { alert = "There's no identity yet. Join a server once to create one."; return }
+        let panel = NSSavePanel()
+        panel.title = "Back Up Identity Key"
+        panel.nameFieldStringValue = "bo3-identity.key"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        try? FileManager.default.removeItem(at: url)
+        do { try FileManager.default.copyItem(at: Self.keyURL, to: url) } catch {
+            alert = "Couldn't save the key: \(error.localizedDescription)"
+        }
+    }
 }

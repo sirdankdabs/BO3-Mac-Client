@@ -45,6 +45,25 @@ struct SettingsView: View {
                         .frame(width: 180)
                 }
             }
+            Section {
+                LabeledContent("Player ID") {
+                    Text(launcher.playerID ?? (launcher.hasIdentity ? "Shown after your next join" : "Created on your first join"))
+                        .font(.body.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                LabeledContent("Identity key") {
+                    HStack {
+                        Button("Import…") { launcher.importIdentity() }
+                        Button("Back Up…") { launcher.exportIdentity() }.disabled(!launcher.hasIdentity)
+                    }
+                }
+            } header: {
+                Text("Identity")
+            } footer: {
+                Text("Community servers recognize you by this key, not by Steam. Your rank, VIP status and stats follow it, so keep a backup. You can import the key from BO3MacFix or the Windows client to keep your existing profile.")
+                    .foregroundStyle(.secondary)
+            }
             Section("Data") {
                 LabeledContent("Logs and identity") {
                     Button("Show in Finder") { launcher.revealDataFolder() }
