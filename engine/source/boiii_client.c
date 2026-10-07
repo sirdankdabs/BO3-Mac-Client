@@ -732,17 +732,28 @@ static void server_id_frame(void) {
     if (!sid.searching) set_server_id(sid.value);
     // CL_SetCGameTime keeps the client PRIMED while the level's loading movie
     // plays (bit 0x100 of the cinematic flags at 0x15999da0, read by
-    // 0x12f0109); on Windows the player can skip it, the Mac build shows no
-    // prompt. Once the level is loaded and the server has let us in, end the
-    // wait so the game starts right away instead of after the whole intro.
+    // 0x12f0109). In a lobby match the lobby tells clients when to start
+    // (0x12eee13(1) sets the "start play" flag 0xb2c0d90); CL_SetCGameTime then
+    // sends "loading_startplay" to the loading screen, which ends the movie
+    // properly (sound, UI state) and the game starts. Community servers have no
+    // lobby, so give that signal ourselves once the level is loaded and the
+    // server has let us in. If the movie still runs 10 s later, end the wait.
     static uint64_t joined_at;
-    if (sid.searching || state != 10) joined_at = 0;
+    static bool start_signalled, forced;
+    if (sid.searching || state != 10) { joined_at = 0; start_signalled = forced = false; }
     if (state == 10 && !sid.searching && sid.sent_value && level_loaded()) {
-        if (!joined_at) joined_at = now_ms();
+        uint64_t now = now_ms();
+        if (!joined_at) joined_at = now;
         volatile uint32_t *cinematic_flags = (volatile uint32_t *)MAC_ADDR(0x15999da0);
-        if (now_ms() - joined_at > 500 && (*cinematic_flags & 0x100)) {
+        if (!start_signalled && now - joined_at > 500) {
+            start_signalled = true;
+            ((void (*)(bool))MAC_ADDR(0x12eee13))(true);
+            t7_log("[BO3MacFix] BOIII: level loaded, telling the loading screen to start\n");
+        }
+        if (!forced && now - joined_at > 10500 && (*cinematic_flags & 0x100)) {
+            forced = true;
             *cinematic_flags &= ~0x100u;
-            t7_log("[BO3MacFix] BOIII: skipping the rest of the loading movie\n");
+            t7_log("[BO3MacFix] BOIII: loading movie still running, ending the wait\n");
         }
     }
     if (state <= 10) return;
