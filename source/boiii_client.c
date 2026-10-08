@@ -58,12 +58,7 @@ static unsigned long public_key_length;
 static int prng_index = -1;
 
 static void file_next_to_dylib(const char *name, char *out, size_t capacity) {
-    Dl_info info;
-    out[0] = 0;
-    if (!dladdr((const void *)file_next_to_dylib, &info) || !info.dli_fname) return;
-    snprintf(out, capacity, "%s", info.dli_fname);
-    char *slash = strrchr(out, '/');
-    if (slash) snprintf(slash + 1, capacity - (size_t)(slash + 1 - out), "%s", name);
+    bo3_data_path(name, out, capacity);
 }
 
 static bool load_or_create_key(void) {
@@ -111,6 +106,7 @@ static struct {
     uint8_t ip[4];
     uint16_t port;
     char map[64], gametype[64], printable[64];
+    char usermap_id[32];      // Workshop id of a custom map the client needs
     uint64_t started_ms;
 } target;
 static uint8_t challenge[32];
@@ -120,6 +116,7 @@ static volatile int have_challenge;
 // requested just before it, once.
 static volatile int challenge_used;
 static uint64_t last_challenge_request;
+static unsigned challenge_requests; // backs off so a silent server is not flooded
 
 // Controller XUIDs live at *(*(0x20915f0 + 8*controller)) (read by
 // LiveUser_GetControllerFromXuid, 0x103a79e). BOIII servers address us by the
@@ -179,8 +176,10 @@ static void hook_CL_CheckForResend(int client) {
             if (!have_challenge) {
                 *state = CONNSTATE_CHALLENGING;
                 uint64_t now = now_ms();
-                if (now - last_challenge_request >= 1000) {
+                uint64_t interval = challenge_requests < 3 ? 1000 : challenge_requests < 6 ? 3000 : 6000;
+                if (now - last_challenge_request >= interval) {
                     last_challenge_request = now;
+                    ++challenge_requests;
                     uint64_t lo, hi;
                     memcpy(&lo, address, 8); memcpy(&hi, address + 8, 8);
                     NET_OutOfBandPrint(CL_GetNetSrc(0), lo, hi, "getchallenge");
@@ -302,6 +301,8 @@ static void accept_challenge(const uint8_t *bytes) {
            challenge[0], challenge[1], challenge[2], challenge[3]);
 }
 
+static void set_status(const char *state, const char *message);
+
 // BOIII servers answer some out-of-band commands with raw "\xff\xff\xff\xff..."
 // packets (no socket byte, no checksum) that the game itself would drop.
 static void handle_raw_packet(const uint8_t *data, size_t length) {
@@ -317,6 +318,11 @@ static void handle_raw_packet(const uint8_t *data, size_t length) {
     text[n] = 0;
     if (strncmp(text, "profileInfo", 11) && strncmp(text, "playerXuid", 10))
         t7_log("[BO3MacFix] BOIII: server says: %s\n", text);
+    if (!strncmp(text, "error", 5) && strncmp(text, "error Bad signature", 19)) {
+        const char *reason = text + 5;
+        while (*reason == ' ' || *reason == '\n' || *reason == '.') ++reason;
+        set_status("failed", reason);
+    }
     // The server verifies against the challenge it holds for our address; if
     // that no longer matches ours, ask for a fresh one and connect again.
     if (!strncmp(text, "error Bad signature", 19) && target.active && signature_retries < 3) {
@@ -542,11 +548,11 @@ static int hook_LiveUser_GetControllerFromXuid(uint64_t xuid) {
 // step to the next value. Once in game the low nibble is fixed by watching
 // whether the server acknowledges our reliable commands. The last working id
 // per server is kept in boiii_serverids.txt as the next starting guess.
-#define PROBE_HOLD_MS 300
+#define PROBE_HOLD_MS 800
 #define PROBE_MIN_RTT 10
 static struct {
     int fixed, active, value, high, low, low_tries, last_state;
-    volatile int searching, sent_value, hit_value, alt_value, gamestate_seq, rejected;
+    volatile int searching, sent_value, hit_value, alt_value, gamestate_seq, rejected, hit_delay;
     uint64_t pending_since;
     // Recent probes (value, send time) to attribute the snapshot burst.
     struct { int value; uint64_t time; } sent[16];
@@ -675,8 +681,11 @@ static void server_id_incoming(const uint8_t *bytes, size_t length) {
     static unsigned recent_count;
     uint64_t now = now_ms();
     recent[recent_count++ % 8] = now;
-    uint64_t window_start = recent[recent_count % 8];
-    int window_count = recent_count >= 8 && now - window_start <= 400 ? 8 : 0;
+    uint64_t oldest = recent[recent_count % 8];
+    int window_count = recent_count >= 8 && now - oldest <= 400 ? 8 : 0;
+    // The burst's start: skip the two oldest of the eight, which may be stray
+    // packets that arrived just before it.
+    uint64_t window_start = recent[(recent_count + 2) % 8];
     if (window_count >= 8) {
         // The server reacts to the first packet carrying the right id, so the
         // burst starts a round trip plus a server frame after that candidate
@@ -689,6 +698,7 @@ static void server_id_incoming(const uint8_t *bytes, size_t length) {
             if (!hit) {
                 if (sid.sent[slot].time + PROBE_MIN_RTT <= window_start) {
                     hit = sid.sent[slot].value;
+                    sid.hit_delay = (int)(window_start - sid.sent[slot].time);
                     if (i + 1 < 16 && i + 1 < count) alt = sid.sent[(count - 2 - i) % 16].value;
                     break;
                 }
@@ -709,8 +719,8 @@ static void server_id_frame(void) {
         sid.searching = 0;
         sid.value = sid.hit_value;
         sid.high = sid.value >> 4;
-        t7_log("[BO3MacFix] BOIII: server accepted serverId 0x%02x (alternative 0x%02x), entering the game\n",
-               sid.value, sid.alt_value);
+        t7_log("[BO3MacFix] BOIII: server accepted serverId 0x%02x after %d ms (alternative 0x%02x), entering the game\n",
+               sid.value, sid.hit_delay, sid.alt_value);
         saved_server_id(true, sid.value);
     }
     (void)last;
@@ -730,17 +740,28 @@ static void server_id_frame(void) {
     if (!sid.searching) set_server_id(sid.value);
     // CL_SetCGameTime keeps the client PRIMED while the level's loading movie
     // plays (bit 0x100 of the cinematic flags at 0x15999da0, read by
-    // 0x12f0109); on Windows the player can skip it, the Mac build shows no
-    // prompt. Once the level is loaded and the server has let us in, end the
-    // wait so the game starts right away instead of after the whole intro.
+    // 0x12f0109). In a lobby match the lobby tells clients when to start
+    // (0x12eee13(1) sets the "start play" flag 0xb2c0d90); CL_SetCGameTime then
+    // sends "loading_startplay" to the loading screen, which ends the movie
+    // properly (sound, UI state) and the game starts. Community servers have no
+    // lobby, so give that signal ourselves once the level is loaded and the
+    // server has let us in. If the movie still runs 10 s later, end the wait.
     static uint64_t joined_at;
-    if (sid.searching || state != 10) joined_at = 0;
+    static bool start_signalled, forced;
+    if (sid.searching || state != 10) { joined_at = 0; start_signalled = forced = false; }
     if (state == 10 && !sid.searching && sid.sent_value && level_loaded()) {
-        if (!joined_at) joined_at = now_ms();
+        uint64_t now = now_ms();
+        if (!joined_at) joined_at = now;
         volatile uint32_t *cinematic_flags = (volatile uint32_t *)MAC_ADDR(0x15999da0);
-        if (now_ms() - joined_at > 500 && (*cinematic_flags & 0x100)) {
+        if (!start_signalled && now - joined_at > 500) {
+            start_signalled = true;
+            ((void (*)(bool))MAC_ADDR(0x12eee13))(true);
+            t7_log("[BO3MacFix] BOIII: level loaded, telling the loading screen to start\n");
+        }
+        if (!forced && now - joined_at > 10500 && (*cinematic_flags & 0x100)) {
+            forced = true;
             *cinematic_flags &= ~0x100u;
-            t7_log("[BO3MacFix] BOIII: skipping the rest of the loading movie\n");
+            t7_log("[BO3MacFix] BOIII: loading movie still running, ending the wait\n");
         }
     }
     if (state <= 10) return;
@@ -812,6 +833,14 @@ static char *hook_LiveSteam_GetPlayerName(uint64_t xuid, char *buffer, int size,
         }
     }
     return orig_LiveSteam_GetPlayerName(xuid, buffer, size, flag);
+}
+
+// Diagnostics: the reliable commands (chat, menu responses...) the client
+// sends to a community server.
+static void (*orig_CL_AddReliableCommand)(int, const char *);
+static void hook_CL_AddReliableCommand(int client, const char *command) {
+    if (target.routing && command) t7_log("[BO3MacFix] BOIII: client command: %.200s\n", command);
+    orig_CL_AddReliableCommand(client, command);
 }
 
 // Every gamestate the client actually parses. Its message sequence (what the
@@ -947,7 +976,7 @@ static bool try_server(const char *text) {
     sendto(sock, query, (size_t)query_length, 0, (struct sockaddr *)&to, sizeof(to));
     ssize_t received = recvfrom(sock, reply, sizeof(reply) - 1, 0, NULL, NULL);
     close(sock);
-    if (received <= 4) { t7_log("[BO3MacFix] BOIII: %s did not answer getInfo\n", text); return false; }
+    if (received <= 4) { t7_log("[BO3MacFix] BOIII: %s did not answer getInfo\n", text); set_status("failed", "The server did not respond"); return false; }
     reply[received] = 0;
     const char *info = strchr(reply + 4, '\n');
     info = info ? info + 1 : "";
@@ -964,13 +993,33 @@ static bool try_server(const char *text) {
     info_value(info, "sv_maxclients", max_clients, sizeof(max_clients));
     t7_log("[BO3MacFix] BOIII: %s '%s' map %s %s protocol %s/%s\n", text, host, map, gametype, protocol, sub);
     if (strcmp(protocol, "8") || (strcmp(sub, "1") && strcmp(sub, "0")) || strcmp(game, "T7") || !*map || !*gametype) {
-        t7_log("[BO3MacFix] BOIII: unsupported server (protocol/gamename)\n"); return false;
+        t7_log("[BO3MacFix] BOIII: unsupported server (protocol/gamename)\n"); set_status("failed", "This server is not compatible"); return false;
     }
-    if (*workshop || *usermap) {
-        t7_log("[BO3MacFix] BOIII: server needs workshop content, not supported yet\n"); return false;
+    // Like the Windows client: a Workshop id alone doesn't block joining. Only
+    // a real mod (modId other than "" / "usermaps") or a map this install
+    // doesn't have (a custom map) needs content on the client; stock maps on
+    // servers whose mod only runs server-side join as usual.
+    char mod_id[64], zone_path[160];
+    info_value(info, "modId", mod_id, sizeof(mod_id));
+    snprintf(zone_path, sizeof(zone_path), "../Assets/zone/%s.ff", map);
+    bool stock_map = access(zone_path, R_OK) == 0;
+    bool real_mod = *mod_id && strcmp(mod_id, "usermaps");
+    const char *map_item = *workshop ? workshop : usermap;
+    bool numeric_item = *map_item && strspn(map_item, "0123456789") == strlen(map_item);
+    target.usermap_id[0] = 0;
+    if (real_mod || (!stock_map && !numeric_item)) {
+        t7_log("[BO3MacFix] BOIII: server needs workshop content (mod '%s', map %s%s), not supported yet\n", mod_id, map,
+               stock_map ? "" : " not installed");
+        set_status("failed", real_mod ? "This server needs a Workshop mod (not supported yet)"
+                                       : "This server's custom map isn't on the Workshop");
+        return false;
     }
+    if (!stock_map) snprintf(target.usermap_id, sizeof(target.usermap_id), "%s", map_item);
+    if (*workshop || *usermap)
+        t7_log("[BO3MacFix] BOIII: server lists Workshop item %s but runs stock map %s; joining\n",
+               *workshop ? workshop : usermap, map);
     if (*max_clients && atoi(clients) >= atoi(max_clients)) {
-        t7_log("[BO3MacFix] BOIII: %s is full (%s/%s)\n", text, clients, max_clients); return false;
+        t7_log("[BO3MacFix] BOIII: %s is full (%s/%s)\n", text, clients, max_clients); set_status("failed", "The server is full"); return false;
     }
     memcpy(target.ip, ip, 4);
     target.port = port;
@@ -1012,12 +1061,80 @@ static void boiii_connect_command(void) {
     start_connect(argv[1]);
 }
 
+// ---- Workshop content (custom maps) ---------------------------------------
+// The game's own Mods menu functions (Lua bindings Mods_*):
+//   Mods_SubscribeUGC(id) 0xe4971e, Mods_InstalledUGC(id) 0xe49763,
+//   Mods_InstallProgressUGC(id) 0xe4977c (float 0..1),
+//   Mods_Lists_UpdateUsermaps() 0xe49263, Mods_SetMod(name) 0xe49c5a (sets
+//   fs_game; "usermaps" for custom maps, "" for none), Mods_Load_Updating()
+//   0xe4a0b9, current mod name at 0x30878dc.
+// Before launching: a custom map is subscribed/downloaded through Steam and
+// "usermaps" is loaded; a stock map unloads "usermaps" (as the Windows client
+// does in CL_SetupForNewServerMap).
+static struct { int stage; uint64_t since, logged; bool subscribed; } content;
+
+static const char *current_mod(void) { return (const char *)MAC_ADDR(0x30878dc); }
+
+// Main thread. Returns true when the launch can go ahead this frame.
+static bool content_ready(void) {
+    bool (*subscribe)(const char *) = (void *)MAC_ADDR(0xe4971e);
+    bool (*installed)(const char *) = (void *)MAC_ADDR(0xe49763);
+    float (*progress)(const char *) = (void *)MAC_ADDR(0xe4977c);
+    void (*update_usermaps)(void) = (void *)MAC_ADDR(0xe49263);
+    void (*set_mod)(const char *) = (void *)MAC_ADDR(0xe49c5a);
+    bool (*mod_loading)(void) = (void *)MAC_ADDR(0xe4a0b9);
+    uint64_t now = now_ms();
+    const char *wanted = target.usermap_id[0] ? "usermaps" : "";
+    switch (content.stage) {
+    case 0: // download
+        if (target.usermap_id[0] && !installed(target.usermap_id)) {
+            if (!content.subscribed) {
+                content.subscribed = true;
+                content.since = now;
+                bool ok = subscribe(target.usermap_id);
+                t7_log("[BO3MacFix] BOIII: subscribing to Workshop map %s (%s)\n", target.usermap_id, ok ? "ok" : "failed");
+            }
+            char message[96];
+            snprintf(message, sizeof(message), "Downloading the map from the Workshop (%d%%)",
+                     (int)(progress(target.usermap_id) * 100.0f));
+            set_status("downloading", message);
+            if (now - content.logged > 5000) { content.logged = now; t7_log("[BO3MacFix] BOIII: %s\n", message); }
+            if (now - content.since > 45 * 60 * 1000) {
+                t7_log("[BO3MacFix] BOIII: Workshop download timed out\n");
+                set_status("failed", "The map download didn't finish. Check Steam's downloads and try again.");
+                target.launch = 0;
+                memset(&content, 0, sizeof(content));
+            }
+            return false;
+        }
+        content.stage = 1;
+        content.since = now;
+        if (target.usermap_id[0]) update_usermaps();
+        // fall through
+    case 1: // load or unload "usermaps"
+        if (strcmp(current_mod(), wanted)) {
+            t7_log("[BO3MacFix] BOIII: switching mod '%s' -> '%s'\n", current_mod(), wanted);
+            set_status("connecting", target.usermap_id[0] ? "Loading the custom map" : "Connecting");
+            set_mod(wanted);
+        }
+        content.stage = 2;
+        content.since = now;
+        return false;
+    case 2: // let the mod system settle
+        if (mod_loading() || now - content.since < 1500) return false;
+        t7_log("[BO3MacFix] BOIII: content ready (mod '%s')\n", current_mod());
+        memset(&content, 0, sizeof(content));
+        return true;
+    }
+    return true;
+}
+
 static uint64_t auto_connect_at;
 static char auto_connect_target[128];
 
+// ---- Server list (BO3MacFix: osascript dialog, boiii_browser.c) ----------
 void boiii_browser_open(void);
 bool boiii_browser_enabled(void);
-
 void boiii_connect_to(const char *address) { start_connect(address); }
 void boiii_file_path(const char *name, char *out, size_t capacity) { file_next_to_dylib(name, out, capacity); }
 
@@ -1026,8 +1143,8 @@ static void boiii_servers_command(void) {
     boiii_browser_open();
 }
 
-// Server list: shown once each time the Zombies menu is reached (and again
-// after leaving a server). Closing it keeps the player in the menu.
+// Shown once each time the Zombies menu is reached (and again after leaving
+// a server). Closing it keeps the player in the menu.
 static uint64_t browser_at;
 static bool browser_armed = true, was_routing;
 static void browser_frame(void) {
@@ -1044,9 +1161,103 @@ static void browser_frame(void) {
     boiii_browser_open();
 }
 
+// ---- Launcher link ---------------------------------------------------------
+// The launcher app drops a join request in the data directory
+// ("join.request": server=ip:port, mode=zm|mp|cp, name=...) and reads the
+// engine's progress from "status" (key=value lines, rewritten on change and
+// every 2 s as a heartbeat).
+static struct {
+    char server[128], mode[8], name[32];
+    bool pending;
+    uint64_t mode_since;
+} join;
+static char status_state[24] = "idle", status_message[160];
+static pthread_mutex_t status_lock = PTHREAD_MUTEX_INITIALIZER;
+
+// Any thread; the file is written by the next heartbeat on the main thread.
+static void set_status(const char *state, const char *message) {
+    pthread_mutex_lock(&status_lock);
+    snprintf(status_state, sizeof(status_state), "%s", state);
+    snprintf(status_message, sizeof(status_message), "%s", message ? message : "");
+    pthread_mutex_unlock(&status_lock);
+}
+
+static void write_status(void) {
+    char path[1024], temp[1040];
+    bo3_data_path("status", path, sizeof(path));
+    snprintf(temp, sizeof(temp), "%s.tmp", path);
+    FILE *file = fopen(temp, "w");
+    if (!file) return;
+    pthread_mutex_lock(&status_lock);
+    fprintf(file, "state=%s\nmessage=%s\nserver=%s\nmode=%s\npid=%d\ntime=%ld\n", status_state, status_message,
+            target.printable, bo3_game_mode(), getpid(), (long)time(NULL));
+    pthread_mutex_unlock(&status_lock);
+    fclose(file);
+    rename(temp, path);
+}
+
+static void poll_join_request(void) {
+    char path[1024];
+    bo3_data_path("join.request", path, sizeof(path));
+    FILE *file = fopen(path, "r");
+    if (!file) return;
+    char line[256], server[128] = "", mode[8] = "zm", name[64] = "";
+    while (fgets(line, sizeof(line), file)) {
+        line[strcspn(line, "\r\n")] = 0;
+        if (!strncmp(line, "server=", 7)) snprintf(server, sizeof(server), "%s", line + 7);
+        else if (!strncmp(line, "mode=", 5)) snprintf(mode, sizeof(mode), "%s", line + 5);
+        else if (!strncmp(line, "name=", 5)) snprintf(name, sizeof(name), "%s", line + 5);
+    }
+    fclose(file);
+    unlink(path);
+    if (!server[0]) return;
+    if (name[0] && strlen(name) <= 16 && !strpbrk(name, "\\\";%")) setenv("BO3MACFIX_PLAYERNAME", name, 1);
+    snprintf(join.server, sizeof(join.server), "%s", server);
+    snprintf(join.mode, sizeof(join.mode), "%s", mode);
+    join.pending = true;
+    join.mode_since = 0;
+    t7_log("[BO3MacFix] BOIII: launcher asked to join %s (%s)\n", server, mode);
+}
+
+static const char *mode_label(const char *mode) {
+    return !strcmp(mode, "mp") ? "Multiplayer" : !strcmp(mode, "cp") ? "Campaign" : "Zombies";
+}
+
+static void launcher_frame(void) {
+    static uint64_t next_poll, next_heartbeat;
+    uint64_t now = now_ms();
+    if (now >= next_poll) { next_poll = now + 500; poll_join_request(); }
+    if (join.pending && !target.active && !target.routing) {
+        if (strcmp(bo3_game_mode(), join.mode)) {
+            char message[96];
+            snprintf(message, sizeof(message), "Open %s in the game menu to join", mode_label(join.mode));
+            set_status("waiting_mode", message);
+            join.mode_since = 0;
+        } else if (!join.mode_since) {
+            join.mode_since = now; // let the menu settle
+            set_status("connecting", "Connecting");
+        } else if (now - join.mode_since > 2500) {
+            join.pending = false;
+            start_connect(join.server);
+        }
+    }
+    int32_t state = *client_state(0);
+    if (target.active) set_status("connecting", "Connecting");
+    else if (target.routing && state >= 11) set_status("in_game", "In game");
+    else if (target.routing) set_status("loading", "Loading the map");
+    else if (!join.pending) {
+        pthread_mutex_lock(&status_lock);
+        bool failed = !strcmp(status_state, "failed");
+        pthread_mutex_unlock(&status_lock);
+        if (!failed) set_status("idle", "");
+    }
+    if (now >= next_heartbeat) { next_heartbeat = now + 2000; write_status(); }
+}
+
 // Main thread, once per frame.
 void boiii_frame(void) {
     browser_frame();
+    launcher_frame();
     // Auto-connect once the player has been sitting in the Zombies menu (not
     // in a match) for 5 seconds.
     if (auto_connect_at) {
@@ -1059,6 +1270,7 @@ void boiii_frame(void) {
             start_connect(auto_connect_target);
         }
     }
+    if (target.launch && !content_ready()) return;
     if (target.launch) {
         target.launch = 0;
         target.active = 1;
@@ -1074,6 +1286,7 @@ void boiii_frame(void) {
         t7_log("[BO3MacFix] BOIII: game socket fd %d\n", game_socket);
         target.started_ms = now_ms();
         last_challenge_request = 0;
+        challenge_requests = 0;
         const char *error = NULL;
         // CL_Connect skips the network handshake when cls.servername is already
         // "localhost" and the client is connected (the menu's local server).
@@ -1150,6 +1363,7 @@ void boiii_frame(void) {
             target.active = 0;
         } else if (now_ms() - target.started_ms > 30000) {
             t7_log("[BO3MacFix] BOIII: connection timed out (state %d)\n", state);
+            set_status("failed", "The server did not respond");
             target.active = 0;
             target.routing = 0;
         }
@@ -1188,6 +1402,20 @@ void boiii_client_install(void) {
     int e = DobbyHook(frontend, (void *)hook_Com_ReturnToFrontend, (void **)&orig_Com_ReturnToFrontend);
     void *server_id = t7_resolve_function("CL_ParseServerId");
     if (server_id) DobbyHook(server_id, (void *)hook_CL_ParseServerId, (void **)&orig_CL_ParseServerId);
+    // Community servers register assets from their server-side mods (perks,
+    // weapons, HUD strings) that the client doesn't have; the client's BG
+    // cache check then drops with EXE_ERR_BG_CACHE "Client/Server Index
+    // Mismatch". The Windows client patches the check out
+    // (BG_Cache_CheckForChecksumMismatchForClient); same here: the "no
+    // mismatch -> return" je at 0x12a2453 becomes jmp.
+    uint8_t *bg_cache_check = (uint8_t *)MAC_ADDR(0x12a2453);
+    if (bg_cache_check[0] == 0x74 && bg_cache_check[1] == 0x33) {
+        uint8_t jmp = 0xeb;
+        int patched = DobbyCodePatch(bg_cache_check, &jmp, 1);
+        t7_log("[BO3MacFix] BOIII: BG cache mismatch check %s\n", patched == 0 ? "disabled" : "patch failed");
+    }
+    void *reliable = t7_resolve_function("CL_AddReliableCommand");
+    if (reliable) DobbyHook(reliable, (void *)hook_CL_AddReliableCommand, (void **)&orig_CL_AddReliableCommand);
     void *parse_gamestate = t7_resolve_function("CL_ParseGamestate");
     if (parse_gamestate)
         DobbyHook(parse_gamestate, (void *)hook_CL_ParseGamestate, (void **)&orig_CL_ParseGamestate);

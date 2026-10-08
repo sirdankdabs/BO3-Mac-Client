@@ -78,6 +78,7 @@ static const char *GetGamemodeString() {
 
 bool bo3_is_campaign(void) { return !strcmp(GetGamemodeString(), "cp"); }
 bool bo3_is_zombies(void) { return !strcmp(GetGamemodeString(), "zm"); }
+const char *bo3_game_mode(void) { return GetGamemodeString(); }
 
 // game functions we call upon
 static void(*build_usermods_path)(const char *filename, const char *extension, size_t out_size, char *out_path, int type_maybe, char *workshop_id);

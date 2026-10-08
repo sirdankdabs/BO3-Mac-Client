@@ -46,6 +46,7 @@ static const struct { const char *name; uint64_t rva; const char *prologue; } t7
     {"Com_ReturnToFrontend", 0xe7535e, "554889e5e8624dfdff31c984c0b80a00"}, // restarts core_frontend (called via EXE_SERVERKILLED path 0xe715e7)
     {"LiveUser_GetControllerFromXuid", 0x103a79e, "554889e5488d0d476e050131c0488b11"}, // xuid -> controller via *(0x20915f0[c]); netchan "no controller found"
     {"CL_ParseServerId", 0xeca498, "554889e55350488d05eba0661039387e"}, // serverId = atoi(CL_GetConfigString(3)) -> cl+0xb684
+    {"CL_AddReliableCommand", 0x1109e58, "554889e54157415641554154534883ec"}, // (lc, cmd); EXE_ERR_CLIENT_CMD_OVERFLOW
     {"CL_ParseGamestate", 0xecaa64, "554889e54157415641554154534881ec"}, // (lc, msg); clc+0x4540 = message sequence afterwards
     {"LiveSteam_GetPlayerName", 0x1435176, "554889e5415741564155415453504189"}, // (xuid, buf, size, flag) -> buf; SteamFriends()->GetFriendPersonaName, "Unknown Soldier" if empty
     {"CL_CGameNeedsServerCommand", 0xe2de31, "554889e54157415641554154534883ec"}, // (lc, number); EXE_ERR_RELIABLE_CYCLED_OUT when number <= clc+0x4544 - 128

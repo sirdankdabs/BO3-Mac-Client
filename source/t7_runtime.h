@@ -7,6 +7,9 @@
 extern "C" {
 #endif
 void t7_log(const char *format, ...) __attribute__((format(printf, 1, 2)));
+// Path of a data file (logs, identity key, settings): $BO3MACFIX_DATA_DIR/name,
+// or the classic BO3MacFix folder next to the game when it is not set.
+void bo3_data_path(const char *name, char *out, size_t capacity);
 void *t7_resolve_function(const char *name);
 // True when the running executable is the Mac build t7_mac_symbols.h describes.
 bool t7_known_mac_build(void);
@@ -20,6 +23,8 @@ bool get_friends_only(void);
 void set_friends_only(bool enabled);
 bool bo3_is_campaign(void);
 bool bo3_is_zombies(void);
+// "zm", "mp", "cp" or "core"
+const char *bo3_game_mode(void);
 // BOIII/Ezz community servers (boiii_probe.c, boiii_client.c)
 void boiii_register(void);
 void boiii_client_register(void);
