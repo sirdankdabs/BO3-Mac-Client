@@ -25,7 +25,10 @@ void t7_log(const char *format, ...) {
     va_copy(copy, args);
     vfprintf(stderr, format, args);
     char path[1024];
-    bo3_data_path("engine.log", path, sizeof(path));
+    // engine.log in the launcher's data directory, t7-status.log in the
+    // classic BO3MacFix folder.
+    const char *dir = getenv("BO3MACFIX_DATA_DIR");
+    bo3_data_path(dir && *dir ? "engine.log" : "t7-status.log", path, sizeof(path));
     FILE *file = fopen(path, "a");
     if (file) { vfprintf(file, format, copy); fclose(file); }
     va_end(copy);
