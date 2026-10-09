@@ -1,0 +1,9 @@
+# Personal data (identity key, game settings): never commit it.
+3 - Personal (keep private)/
+*.dat
+boiii_serverids.txt
+.DS_Store
+2 - Source Code/BO3MacClient/build/
+2 - Source Code/BO3MacClient/dist/
+2 - Source Code/BO3MacClient/engine/build/
+2 - Source Code/BO3MacClient/engine/BO3MacFix.dylib
