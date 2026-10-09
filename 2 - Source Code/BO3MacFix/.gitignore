@@ -1,0 +1,17 @@
+.DS_Store
+*.dSYM
+assets
+release
+staging
+launcherv2
+natives
+AppBundleExe
+Install_BO3MacFix
+BO3MacFixLauncher
+*.dylib
+*.exe
+*.dll
+*.clump
+*.bin
+
+build/
