@@ -1,0 +1,6 @@
+build/
+dist/
+engine/build/
+engine/BO3MacFix.dylib
+engine/*.dSYM
+.DS_Store
