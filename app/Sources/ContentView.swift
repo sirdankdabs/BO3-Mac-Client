@@ -133,6 +133,15 @@ struct ContentView: View {
                 }
                 .width(min: 150, ideal: 190)
 
+                TableColumn("Round", value: \.round) { server in
+                    if server.mode == .zombies && server.round > 0 {
+                        Text("\(server.round)").monospacedDigit()
+                    } else {
+                        Text("—").foregroundStyle(.tertiary)
+                    }
+                }
+                .width(min: 55, ideal: 65)
+
                 TableColumn("Players", value: \.humans) { server in
                     PlayersView(server: server)
                 }

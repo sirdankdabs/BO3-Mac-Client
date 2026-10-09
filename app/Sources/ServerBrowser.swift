@@ -23,6 +23,8 @@ struct Server: Identifiable, Hashable {
     var bots = 0
     var maxClients = 0
     var ping = 0
+    /// Current Zombies round (`rounds_played` in infoResponse); 0 when unknown or not Zombies.
+    var round = 0
     var isPrivate = false
     var workshopID = ""
     var modID = ""
@@ -213,6 +215,7 @@ final class ServerBrowser: ObservableObject {
             server.bots = Int(info["bots"] ?? "") ?? 0
             server.maxClients = Int(info["sv_maxclients"] ?? "") ?? 0
             server.isPrivate = info["isPrivate"] == "1"
+            server.round = Int(info["rounds_played"] ?? "") ?? 0
             server.workshopID = info["workshop_id"] ?? info["usermapId"] ?? ""
             server.modName = ColorCodes.strip(info["modName"] ?? "")
             server.modID = info["modId"] ?? ""
